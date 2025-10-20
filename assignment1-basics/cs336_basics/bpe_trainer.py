@@ -1,9 +1,60 @@
+# 负责从语料中训练bpe编码器，并将结果保存到本地
 import os
 from typing import BinaryIO, Iterator
 import regex as re  # 使用 regex 库，由于re对GPT-2的tokenization支持不好
+import base64
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
-from .pretokenization_example import find_chunk_boundaries
+
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(
+        split_special_token, bytes
+    ), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
 
 def split_on_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
     """
@@ -11,12 +62,13 @@ def split_on_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
     args:
         text: 输入字符串。
         special_tokens: 要拆分的特殊词元列表。
-    
+
     returns:
         拆分后的字符串列表。
     """
-    PAT = "|".join(re.escape(tok) for tok in special_tokens) # 不包含捕获组
+    PAT = "|".join(re.escape(tok) for tok in special_tokens)  # 不包含捕获组
     return re.split(PAT, text)
+
 
 def pre_tokenize(text: str) -> Iterator[str]:
     """
@@ -24,13 +76,16 @@ def pre_tokenize(text: str) -> Iterator[str]:
     减轻负载，同时避免语义相近的词被拆散
     args:
         text: 输入字符串。
-    
+
     returns:
         预分词单元的迭代器。
     """
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     # PAT = r"\S+|\s+"    # 按空格拆分
-    return (m.group(0) for m in re.finditer(PAT, text))  # 返回字符串迭代器而非match对象迭代器
+    return (
+        m.group(0) for m in re.finditer(PAT, text)
+    )  # 返回字符串迭代器而非match对象迭代器
+
 
 def process_chunk(args) -> defaultdict[tuple[bytes, ...], int]:
     """
@@ -41,26 +96,27 @@ def process_chunk(args) -> defaultdict[tuple[bytes, ...], int]:
         预分词单元频率的字典。
     """
     start, end, input_path = args
-    local_freq = defaultdict(int)   # 存储预分词单元的频率
-    
+    local_freq = defaultdict(int)  # 存储预分词单元的频率
+
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
-        chunk = chunk.replace('\r\n', '\n').replace('\r', '\n')     # 统一换行符
-        
-        docs = split_on_special_tokens(chunk, ["<|endoftext|>"])    # 按文档边界拆分
+        chunk = chunk.replace("\r\n", "\n").replace("\r", "\n")  # 统一换行符
+
+        docs = split_on_special_tokens(chunk, ["<|endoftext|>"])  # 按文档边界拆分
         for doc in docs:
             for pre_token in pre_tokenize(doc):
                 token_bytes = pre_token.encode("utf-8")
-                byte_seq = tuple(bytes([b]) for b in token_bytes)   # 转换为字节序列的元组
+                byte_seq = tuple(
+                    bytes([b]) for b in token_bytes
+                )  # 转换为字节序列的元组
                 local_freq[byte_seq] += 1
-                
+
     return local_freq
- 
+
+
 def bpe(
-    input_path: str | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str]
+    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
     训练BPE模型。
@@ -71,9 +127,13 @@ def bpe(
     returns:
         词汇表（索引到字节字符串的映射）和合并规则列表。
     """
-    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}    # 存储词汇表，索引到字节字符串的映射
+    vocab: dict[int, bytes] = {
+        i: bytes([i]) for i in range(256)
+    }  # 存储词汇表，索引到字节字符串的映射
     merges: list[tuple[bytes, bytes]] = []  # 存储合并规则
-    pre_token2freq: defaultdict[tuple[bytes, ...], int] = defaultdict(int)  # 存储预分词单元的频率
+    pre_token2freq: defaultdict[tuple[bytes, ...], int] = defaultdict(
+        int
+    )  # 存储预分词单元的频率
 
     # 处理特殊词元
     for token in special_tokens:
@@ -81,61 +141,109 @@ def bpe(
 
     # 多线程预分词
     with open(input_path, "rb") as f:
-        num_processes = 4
-        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")  # 划分特定大小
+        num_processes = 8
+        boundaries = find_chunk_boundaries(
+            f, num_processes, b"<|endoftext|>"
+        )  # 划分特定大小
 
-        chunk_args = [(start, end, input_path) 
-                     for start, end in zip(boundaries[:-1], boundaries[1:])]
+        chunk_args = [
+            (start, end, input_path)
+            for start, end in zip(boundaries[:-1], boundaries[1:])
+        ]
         with ProcessPoolExecutor(max_workers=num_processes) as ex:
             results = ex.map(process_chunk, chunk_args, chunksize=1)
-            
+
         for result in results:  # 合并各块的频率
             for k, v in result.items():
                 pre_token2freq[k] += v
-                
+
     # 迭代合并字节对
     while len(vocab) < vocab_size:
         # 找到最频繁的字节对
         pair2freq: defaultdict[tuple[bytes, bytes], int] = defaultdict(int)
-        for byte_seq, freq in pre_token2freq.items():   # 计算字节对频率
+        for byte_seq, freq in pre_token2freq.items():  # 计算字节对频率
             for i in range(len(byte_seq) - 1):
                 pair = (byte_seq[i], byte_seq[i + 1])
                 pair2freq[pair] += freq
         if not pair2freq:  # 没有更多的字节对可合并
             break
-        most_frequent_pair = max(pair2freq.items(), key=lambda x: (x[1], x[0]))[0]  # 频率最高的字节对，且字典序最小
+        most_frequent_pair = max(pair2freq.items(), key=lambda x: (x[1], x[0]))[
+            0
+        ]  # 频率最高的字节对，且字典序最小
         # 创建新词汇项
         new_token = most_frequent_pair[0] + most_frequent_pair[1]
         vocab[len(vocab)] = new_token
         # 更新预分词频率
         to_update: dict[tuple[bytes, ...], int] = {}
-        for byte_seq, freq in pre_token2freq.items():    # 检查序列是否包含目标字节对
+        for byte_seq, freq in pre_token2freq.items():  # 检查序列是否包含目标字节对
             has_target_pair = False
             for i in range(len(byte_seq) - 1):
                 if (byte_seq[i], byte_seq[i + 1]) == most_frequent_pair:
                     has_target_pair = True
                     break
-            
-            if has_target_pair: # 记录需要更新的序列
+
+            if has_target_pair:  # 记录需要更新的序列
                 to_update[byte_seq] = freq
 
         # 只更新包含目标字节对的序列
         for byte_seq, freq in to_update.items():
-            del pre_token2freq[byte_seq]    # 从原字典中移除旧序列
-            
+            del pre_token2freq[byte_seq]  # 从原字典中移除旧序列
+
             new_byte_seq: list[bytes] = []
             i = 0
             while i < len(byte_seq):
-                if i < len(byte_seq) - 1 and (byte_seq[i], byte_seq[i + 1]) == most_frequent_pair:
+                if (
+                    i < len(byte_seq) - 1
+                    and (byte_seq[i], byte_seq[i + 1]) == most_frequent_pair
+                ):
                     new_byte_seq.append(new_token)
                     i += 2
                 else:
                     new_byte_seq.append(byte_seq[i])
                     i += 1
-            
+
             pre_token2freq[tuple(new_byte_seq)] += freq  # 将合并后的序列添加回字典
         # 记录合并规则
         merges.append(most_frequent_pair)
 
-
     return vocab, merges
+
+
+def save_vocab_and_merges(
+    output_dir: str | os.PathLike,
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+) -> None:
+    """
+    保存词表和合并规则为 Base64 文本格式。
+    每行结构：
+      vocab.txt: index<TAB>base64_token
+      merges.txt: base64_a base64_b
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    vocab_path = os.path.join(output_dir, "vocab.txt")
+    merges_path = os.path.join(output_dir, "merges.txt")
+
+    with open(vocab_path, "w", encoding="utf-8") as vf:  # 保存词表
+        for idx in sorted(vocab.keys()):
+            token_bytes = vocab[idx]
+            token_b64 = base64.b64encode(token_bytes).decode("ascii")
+            vf.write(f"{idx}\t{token_b64}\n")
+
+    with open(merges_path, "w", encoding="utf-8") as mf:  # 保存合并规则
+        for a, b in merges:
+            a_b64 = base64.b64encode(a).decode("ascii")
+            b_b64 = base64.b64encode(b).decode("ascii")
+            mf.write(f"{a_b64} {b_b64}\n")
+
+    print(f"Base64-encoded vocab and merges saved to {vocab_path} and {merges_path}")
+
+
+if __name__ == "__main__":
+    vocab, merges = bpe(
+        input_path="../data/TinyStoriesV2-GPT4-train.txt",
+        vocab_size=10000,
+        special_tokens=["<|endoftext|>"],
+    )
+
+    save_vocab_and_merges(output_dir="../data/ts-v", vocab=vocab, merges=merges)
