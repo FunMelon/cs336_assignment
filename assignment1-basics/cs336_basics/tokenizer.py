@@ -1,6 +1,7 @@
-import base64
 from typing import Iterable, Iterator
 import regex as re
+import json
+from .bpe_trainer import bytes_to_unicode
 
 
 def pre_tokenize(text: str) -> Iterator[str]:
@@ -24,6 +25,19 @@ def get_pairs(word: list[bytes]):
         相邻字节对的集合。
     """
     return {(word[i], word[i + 1]) for i in range(len(word) - 1)}
+
+
+def encode_str_to_bytes(s: str) -> bytes:
+    """
+    将字符串编码为字节序列，使用 bytes_to_unicode 映射。
+    args:
+        s: 输入字符串。
+    returns:
+        对应的字节序列。
+    """
+    byte_encoder = bytes_to_unicode()
+    byte_decoder = {v: k for k, v in byte_encoder.items()}
+    return bytes([byte_decoder[c] for c in s])
 
 
 class Tokenizer:
@@ -73,21 +87,30 @@ class Tokenizer:
         returns:
             Tokenizer: 初始化后的分词器实例。
         """
+
         # 加载词表
         vocab: dict[int, bytes] = {}
         with open(vocab_filepath, encoding="utf-8") as vf:
-            for line in vf:
-                idx, token_b64 = line.rstrip("\n").split("\t", 1)
-                token_bytes = base64.b64decode(token_b64.encode("ascii"))
-                vocab[int(idx)] = token_bytes
+            vocab_dict = json.load(vf)
+
+        inv_vocab = {v: k for k, v in vocab_dict.items()}  # 反转词表映射
+        vocab: dict[int, bytes] = {}
+        for idx, token_str in inv_vocab.items():
+            vocab[int(idx)] = encode_str_to_bytes(token_str)
+
         # 加载合并规则
         merges: list[tuple[bytes, bytes]] = []
         with open(merges_filepath, encoding="utf-8") as mf:
-            for line in mf:
-                a_b64, b_b64 = line.rstrip("\n").split(" ")
-                a = base64.b64decode(a_b64.encode("ascii"))
-                b = base64.b64decode(b_b64.encode("ascii"))
-                merges.append((a, b))
+            lines = [l.strip() for l in mf.readlines()]
+            # 跳过 #version: 0.2 行
+            for line in lines:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(" ")
+                if len(parts) != 2:
+                    continue
+                a, b = parts
+                merges.append((encode_str_to_bytes(a), encode_str_to_bytes(b)))
 
         return cls(vocab, merges, special_tokens)
 

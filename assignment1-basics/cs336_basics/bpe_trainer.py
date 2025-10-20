@@ -2,10 +2,30 @@
 import os
 from typing import BinaryIO, Iterator
 import regex as re  # 使用 regex 库，由于re对GPT-2的tokenization支持不好
-import base64
+import json
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
+
+def bytes_to_unicode():
+    """
+    将任意字节映射为可打印的单字符字符串
+    returns:
+        dict: 映射字典，键为字节(int)，值为对应的可见字符(str)。
+    """
+    # bs初始为可打印字符的字节值列表
+    bs = list(range(ord("!"), ord("~")+1)) + list(range(ord("¡"), ord("¬")+1)) + list(range(ord("®"), ord("ÿ")+1))
+    cs = bs[:]
+    n = 0
+    # 将不可打印的字节映射到256以上的Unicode码点
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    # 将bs和cs映射为字节到字符的字典
+    cs = [chr(c) for c in cs]
+    return dict(zip(bs, cs))
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -163,8 +183,7 @@ def bpe(
         pair2freq: defaultdict[tuple[bytes, bytes], int] = defaultdict(int)
         for byte_seq, freq in pre_token2freq.items():  # 计算字节对频率
             for i in range(len(byte_seq) - 1):
-                pair = (byte_seq[i], byte_seq[i + 1])
-                pair2freq[pair] += freq
+                pair2freq[byte_seq[i], byte_seq[i + 1]] += freq
         if not pair2freq:  # 没有更多的字节对可合并
             break
         most_frequent_pair = max(pair2freq.items(), key=lambda x: (x[1], x[0]))[
@@ -209,39 +228,39 @@ def bpe(
     return vocab, merges
 
 
-def save_vocab_and_merges(
-    output_dir: str | os.PathLike,
-    vocab: dict[int, bytes],
-    merges: list[tuple[bytes, bytes]],
-) -> None:
+def save_vocab_and_merges(output_dir, vocab, merges):
     """
-    保存词表和合并规则为 Base64 文本格式。
-    每行结构：
-      vocab.txt: index<TAB>base64_token
-      merges.txt: base64_a base64_b
+    保存词汇表和合并规则为 HuggingFace 格式。
+    args:
+        output_dir: 输出目录路径。
+        vocab: 词汇表（索引到字节字符串的映射）。
+        merges: 合并规则列表。
     """
     os.makedirs(output_dir, exist_ok=True)
-    vocab_path = os.path.join(output_dir, "vocab.txt")
+    vocab_path = os.path.join(output_dir, "vocab.json")
     merges_path = os.path.join(output_dir, "merges.txt")
 
-    with open(vocab_path, "w", encoding="utf-8") as vf:  # 保存词表
-        for idx in sorted(vocab.keys()):
-            token_bytes = vocab[idx]
-            token_b64 = base64.b64encode(token_bytes).decode("ascii")
-            vf.write(f"{idx}\t{token_b64}\n")
+    byte_encoder = bytes_to_unicode()   # 获取字节到可见字符的映射
 
-    with open(merges_path, "w", encoding="utf-8") as mf:  # 保存合并规则
+    def decode_bytes(token_bytes: bytes) -> str:
+        return "".join(byte_encoder[b] for b in token_bytes)
+
+    vocab_dict = {decode_bytes(v): k for k, v in vocab.items()} # 构造 vocab.json 字典
+
+    with open(vocab_path, "w", encoding="utf-8") as vf:
+        json.dump(vocab_dict, vf, ensure_ascii=False)
+
+    with open(merges_path, "w", encoding="utf-8") as mf:
+        mf.write("#version: 0.2\n")
         for a, b in merges:
-            a_b64 = base64.b64encode(a).decode("ascii")
-            b_b64 = base64.b64encode(b).decode("ascii")
-            mf.write(f"{a_b64} {b_b64}\n")
+            mf.write(f"{decode_bytes(a)} {decode_bytes(b)}\n")
 
-    print(f"Base64-encoded vocab and merges saved to {vocab_path} and {merges_path}")
+    print(f"Vocab and merges saved to {vocab_path} and {merges_path}")
 
 
 if __name__ == "__main__":
     vocab, merges = bpe(
-        input_path="../data/TinyStoriesV2-GPT4-train.txt",
+        input_path="../data/TinyStoriesV2-GPT4-valid.txt",
         vocab_size=10000,
         special_tokens=["<|endoftext|>"],
     )
