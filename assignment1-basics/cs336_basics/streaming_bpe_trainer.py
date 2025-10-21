@@ -5,6 +5,7 @@ import regex as re  # 使用 regex 库，由于re对GPT-2的tokenization支持�
 import json
 from collections import defaultdict
 from tqdm import tqdm
+import time
 
 def bytes_to_unicode():
     """
@@ -163,6 +164,7 @@ def bpe_streaming(
     chunk_id = 0
 
     print(f"Start streaming BPE training from {input_path}")
+    pretokenize_start_time = time.time()
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, chunk_num, b"<|endoftext|>")
         for i in range(len(boundaries) - 1):
@@ -180,10 +182,10 @@ def bpe_streaming(
             del local_freq  # 释放内存
 
             print(
-                f"Processed chunk {chunk_id}, current token units: {len(pre_token2freq):,}"
+                f"Processed chunk {chunk_id}, current token units: {len(pre_token2freq):,}, cost time: {time.time() - pretokenize_start_time:.2f} seconds"
             )
-
-    print(f"Finished preprocessing {chunk_id} chunks, begin BPE merge...")
+    pretokenize_end_time = time.time()
+    print(f"Finished preprocessing {chunk_id} chunks, total time cost: {pretokenize_end_time - pretokenize_start_time:.2f} seconds")
     # 迭代合并字节对
     with tqdm(total=vocab_size - len(vocab), desc="BPE merging") as pbar:
         while len(vocab) < vocab_size:
@@ -193,6 +195,8 @@ def bpe_streaming(
                 for i in range(len(byte_seq) - 1):
                     pair2freq[byte_seq[i], byte_seq[i + 1]] += freq
             if not pair2freq:  # 没有更多的字节对可合并
+                pbar.n = pbar.total
+                pbar.refresh()
                 break
             most_frequent_pair = max(pair2freq.items(), key=lambda x: (x[1], x[0]))[
                 0
@@ -207,8 +211,6 @@ def bpe_streaming(
                 for i in range(len(byte_seq) - 1):
                     if (byte_seq[i], byte_seq[i + 1]) == most_frequent_pair:
                         has_target_pair = True
-                        pbar.n = pbar.total
-                        pbar.refresh()
                         break
 
                 if has_target_pair:  # 记录需要更新的序列
