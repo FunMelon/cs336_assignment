@@ -3,6 +3,11 @@ import regex as re
 import json
 from .bpe_trainer import bytes_to_unicode
 
+_BYTE_ENCODER = bytes_to_unicode()
+_BYTE_DECODER = {v: k for k, v in _BYTE_ENCODER.items()}
+
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+re_complied = re.compile(PAT)
 
 def pre_tokenize(text: str) -> Iterator[str]:
     """
@@ -12,8 +17,7 @@ def pre_tokenize(text: str) -> Iterator[str]:
     returns:
         预分词单元的迭代器。
     """
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    return (m.group(0) for m in re.finditer(PAT, text))
+    return (m.group(0) for m in re_complied.finditer(text))
 
 
 def get_pairs(word: list[bytes]):
@@ -35,9 +39,8 @@ def encode_str_to_bytes(s: str) -> bytes:
     returns:
         对应的字节序列。
     """
-    byte_encoder = bytes_to_unicode()
-    byte_decoder = {v: k for k, v in byte_encoder.items()}
-    return bytes([byte_decoder[c] for c in s])
+
+    return bytes(_BYTE_DECODER[c] for c in s)
 
 
 class Tokenizer:
@@ -89,14 +92,11 @@ class Tokenizer:
         """
 
         # 加载词表
-        vocab: dict[int, bytes] = {}
         with open(vocab_filepath, encoding="utf-8") as vf:
             vocab_dict = json.load(vf)
 
-        inv_vocab = {v: k for k, v in vocab_dict.items()}  # 反转词表映射
-        vocab: dict[int, bytes] = {}
-        for idx, token_str in inv_vocab.items():
-            vocab[int(idx)] = encode_str_to_bytes(token_str)
+        vocab = {int(v): encode_str_to_bytes(k) for k, v in vocab_dict.items()}
+
 
         # 加载合并规则
         merges: list[tuple[bytes, bytes]] = []
@@ -164,7 +164,7 @@ class Tokenizer:
 
             for byte_seq in pre_tokens:
                 pairs = get_pairs(byte_seq)  # 获取当前字节序列的相邻字节对
-                while pairs:
+                while pairs:    # TODO: 这里是O(n^2)的，能不能优化？
                     best = min(
                         pairs, key=lambda pair: merge_ranks.get(pair, float("inf"))
                     )  # 找到排名最高的字节对
