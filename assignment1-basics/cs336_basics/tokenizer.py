@@ -63,6 +63,7 @@ class Tokenizer:
         self.token2id: dict[bytes, int] = {  # 反向映射
             token_bytes: token_id for token_id, token_bytes in vocab.items()
         }
+        self.vocab_size = len(vocab)
 
         if self.special_tokens:
             sorted_tokens = sorted(
