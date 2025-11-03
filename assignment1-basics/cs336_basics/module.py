@@ -211,3 +211,41 @@ class PositionwiseFeedForward(torch.nn.Module):
             str: 逐位置前馈网络的字符串表示。
         """
         return f"PositionwiseFeedForward(d_model={self.linear1.in_features}, d_ff={self.linear1.out_features})"
+
+
+class RoPE(torch.nn.Module):
+    """
+    继承自 torch.nn.Module 的自实现的旋转位置编码模块
+    """
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+        """
+        初始化旋转位置编码模块，将正弦和余弦位置编码注册为buffer。
+        args:
+            theta (float): 旋转角度的缩放因子。
+            d_k (int): 位置编码的维度。
+            max_seq_len (int): 最大序列长度。
+            device (torch.device | None): 参数所在的设备。
+        """
+        super().__init__()
+        position = torch.arange(max_seq_len, device=device).unsqueeze(1) # 位置索引，形状为 (max_seq_len, 1)
+        div_term = torch.exp(
+            torch.arange(0, d_k, 2, device=device) * (-torch.log(torch.tensor(theta)) / d_k)
+        )   # exp((i) * (-log θ / d_k)) = θ^(-i / d_k) = 1 / θ^(i / d_k)，形状为 (d_k/2, )
+
+        sin = torch.sin(position * div_term)
+        cos = torch.cos(position * div_term)
+
+        self.register_buffer("sin", sin, persistent=False) # 注册为非持久buffer（不保存在state_dict中）
+        self.register_buffer("cos", cos, persistent=False)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        sin = self.sin[token_positions] # type: ignore
+        cos = self.cos[token_positions] # type: ignore
+
+        x_even = x[..., 0::2]
+        x_odd  = x[..., 1::2]
+
+        x_rot_even = x_even * cos - x_odd * sin
+        x_rot_odd  = x_even * sin + x_odd * cos
+
+        return torch.stack((x_rot_even, x_rot_odd), dim=-1).flatten(-2)  # 先拼接后展平
