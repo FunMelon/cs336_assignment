@@ -14,6 +14,7 @@ from cs336_basics import (
     Linear,
     Embedding,
     RMSNorm,
+    SiLU,
 )
 
 def run_linear(
@@ -403,7 +404,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    return SiLU().forward(in_features)
 
 
 def run_get_batch(
