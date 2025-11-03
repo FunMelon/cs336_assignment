@@ -5,7 +5,7 @@ try:
     from .tokenizer import Tokenizer
     from .bpe.bpe_trainer import find_chunk_boundaries, bpe
     # module
-    from .module import Linear
+    from .module import Linear, Embedding
 
     __version__ = version("cs336_basics")
     __all__ = ['Tokenizer', 'find_chunk_boundaries', 'bpe', 'Linear']

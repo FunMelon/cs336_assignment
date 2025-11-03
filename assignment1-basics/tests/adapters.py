@@ -12,6 +12,7 @@ from cs336_basics import (
     bpe,
     Tokenizer,
     Linear,
+    Embedding,
 )
 
 def run_linear(
@@ -56,7 +57,9 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    Embedding_layer = Embedding(vocab_size, d_model, None, None)
+    Embedding_layer.load_state_dict({'weight': weights})
+    return Embedding_layer.forward(token_ids)
 
 
 def run_swiglu(

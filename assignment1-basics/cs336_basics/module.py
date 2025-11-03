@@ -1,3 +1,4 @@
+# 自实现的线性层和嵌入层
 import torch
 from math import sqrt
 
@@ -41,3 +42,34 @@ class Linear(torch.nn.Module):
             str: 线性层的字符串表示。
         """
         return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias=False)"
+
+class Embedding(torch.nn.Module):
+    """
+        继承自 torch.nn.Module 的自实现的嵌入层模块
+    """
+    def __init__(self, num_embeddings: int, embedding_dim: int, device: torch.device | None = None, dtype: torch.dtype | None = None):
+        """
+        初始化嵌入层，创建嵌入矩阵参数。
+        args:
+            num_embeddings (int): 嵌入词典的大小。
+            embedding_dim (int): 每个嵌入向量的维度。
+            device (torch.device | None): 参数所在的设备。
+            dtype (torch.dtype | None): 参数的数据类型。
+        """
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        # 根据词典大小和嵌入维度创建嵌入矩阵参数
+        tensor = torch.empty((num_embeddings, embedding_dim), device=device, dtype=dtype)
+        torch.nn.init.trunc_normal_(tensor, mean=0.0, std=1, a=-3.0, b=3.0)
+        self.weight = torch.nn.Parameter(tensor)
+    
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播方法，查找嵌入向量。
+        args:
+            token_ids (torch.Tensor): 输入的token ID张量，形状为 (..., )。
+        returns:
+            torch.Tensor: 输出的嵌入向量张量，形状为 (..., embedding_dim)。
+        """
+        return self.weight[token_ids]
