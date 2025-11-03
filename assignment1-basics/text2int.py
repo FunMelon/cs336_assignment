@@ -5,7 +5,7 @@ import numpy as np
 import math
 import tqdm
 from cs336_basics.tokenizer import Tokenizer
-from cs336_basics.bpe_trainer import find_chunk_boundaries
+from cs336_basics.bpe.bpe_trainer import find_chunk_boundaries
 
 
 def saveID(input_path: str, save_dir: str, tokenizer: Tokenizer, chunk_size_mb=16):

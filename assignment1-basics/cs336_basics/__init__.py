@@ -2,7 +2,7 @@
 try:
     from importlib.metadata import version
     from .tokenizer import Tokenizer
-    from .bpe_trainer import find_chunk_boundaries, bpe
+    from .bpe.bpe_trainer import find_chunk_boundaries, bpe
 
     __version__ = version("cs336_basics")
     __all__ = ['Tokenizer', 'find_chunk_boundaries', 'bpe']
