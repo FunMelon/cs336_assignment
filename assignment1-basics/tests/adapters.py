@@ -13,6 +13,7 @@ from cs336_basics import (
     Tokenizer,
     Linear,
     Embedding,
+    RMSNorm,
 )
 
 def run_linear(
@@ -386,7 +387,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    RMSNorm_layer = RMSNorm(d_model, eps, None, None)
+    RMSNorm_layer.load_state_dict({'scale': weights})
+    return RMSNorm_layer.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:

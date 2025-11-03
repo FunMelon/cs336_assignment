@@ -5,10 +5,10 @@ try:
     from .tokenizer import Tokenizer
     from .bpe.bpe_trainer import find_chunk_boundaries, bpe
     # module
-    from .module import Linear, Embedding
+    from .module import Linear, Embedding, RMSNorm
 
     __version__ = version("cs336_basics")
-    __all__ = ['Tokenizer', 'find_chunk_boundaries', 'bpe', 'Linear']
+    __all__ = ['Tokenizer', 'find_chunk_boundaries', 'bpe', 'Linear', 'Embedding', 'RMSNorm']
 
 except Exception:
     # 开发环境下的版本号
