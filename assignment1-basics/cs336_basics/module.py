@@ -183,6 +183,7 @@ class PositionwiseFeedForward(torch.nn.Module):
             dtype (torch.dtype | None): 参数的数据类型。
         """
         super().__init__()
+        assert d_ff % 64 == 0, f"d_ff ({d_ff}) must be a multiple of 64 for efficient computation." # 确保d_ff是64的倍数以提高计算效率（CUDA的warp大小）
         self.linear1 = Linear(d_model, d_ff, device, dtype)
         self.linear2 = Linear(d_ff, d_model, device, dtype)
         self.linear3 = Linear(d_model, d_ff, device, dtype)
