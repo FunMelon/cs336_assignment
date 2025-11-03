@@ -7,7 +7,7 @@ try:
     from .bpe.bpe_trainer import find_chunk_boundaries, bpe
 
     # module
-    from .module import Linear, Embedding, RMSNorm, SiLU
+    from .module import Linear, Embedding, RMSNorm, SiLU, PositionwiseFeedForward
 
     __version__ = version("cs336_basics")
     __all__ = [
@@ -18,6 +18,7 @@ try:
         "Embedding",
         "RMSNorm",
         "SiLU",
+        "PositionwiseFeedForward",
     ]
 
 except Exception:

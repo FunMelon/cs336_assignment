@@ -166,3 +166,47 @@ class SiLU(torch.nn.Module):
             torch.Tensor: 输出张量，应用SiLU激活函数后的结果。
         """
         return x * torch.sigmoid(x)
+
+
+class PositionwiseFeedForward(torch.nn.Module):
+    """
+    继承自 torch.nn.Module 的自实现的逐位置前馈网络模块，使用SwiGLU激活函数
+    """
+
+    def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
+        """
+        初始化逐位置前馈网络，创建两个线性层和激活函数。
+        args:
+            d_model (int): 输入和输出特征的维度。
+            d_ff (int): 前馈网络中间层的维度。
+            device (torch.device | None): 参数所在的设备。
+            dtype (torch.dtype | None): 参数的数据类型。
+        """
+        super().__init__()
+        self.linear1 = Linear(d_model, d_ff, device, dtype)
+        self.linear2 = Linear(d_ff, d_model, device, dtype)
+        self.linear3 = Linear(d_model, d_ff, device, dtype)
+        self.activation = SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播方法，计算逐位置前馈网络的输出。
+        args:
+            x (torch.Tensor): 输入张量，形状为 (..., d_model)。
+        returns:
+            torch.Tensor: 输出张量，形状为 (..., d_model)。
+        """
+        x1 = self.linear1(x)
+        x1 = self.activation(x1)
+        x2 = self.linear3(x)
+        x3 = x1 * x2
+        output = self.linear2(x3)
+        return output
+
+    def __repr__(self) -> str:
+        """
+        返回逐位置前馈网络的字符串表示。
+        returns:
+            str: 逐位置前馈网络的字符串表示。
+        """
+        return f"PositionwiseFeedForward(d_model={self.linear1.in_features}, d_ff={self.linear1.out_features})"
