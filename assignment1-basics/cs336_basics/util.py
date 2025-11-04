@@ -25,3 +25,32 @@ def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
     max_val = x.max(dim=dim, keepdim=True).values  # 保留维度以便广播
     exp_x = torch.exp(x - max_val)
     return exp_x / exp_x.sum(dim=dim, keepdim=True)
+
+
+def scaled_dot_product_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    计算缩放点积注意力。
+    args:
+        query (torch.Tensor): 查询张量，形状为 (..., seq_len_q, d_k)。
+        key (torch.Tensor): 键张量，形状为 (..., seq_len_k, d_k)。
+        value (torch.Tensor): 值张量，形状为 (..., seq_len_v, d_v)。
+        mask (torch.Tensor | None): 可选的掩码张量，形状为 (..., seq_len_q, seq_len_k)。
+    returns:
+        torch.Tensor: 注意力输出张量，形状为 (..., seq_len_q, d_v)。
+    """
+    d_k = query.size(-1)
+    scores = torch.matmul(query, key.transpose(-2, -1)) / torch.sqrt(
+        torch.tensor(d_k, dtype=query.dtype, device=query.device)
+    )
+
+    if mask is not None:
+        scores = scores.masked_fill(mask == False, float("-inf"))   # 使用掩码
+
+    attn_weights = softmax(scores, dim=-1)
+    output = torch.matmul(attn_weights, value)
+    return output

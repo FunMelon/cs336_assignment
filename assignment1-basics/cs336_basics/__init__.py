@@ -10,6 +10,7 @@ try:
     from .util import (
         SiLU,
         softmax,
+        scaled_dot_product_attention,
     )
     from .module import (
         Linear,
@@ -31,6 +32,7 @@ try:
         "PositionwiseFeedForward",
         "RoPE",
         "softmax",
+        "scaled_dot_product_attention",
     ]
 
 except Exception:

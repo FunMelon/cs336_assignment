@@ -14,7 +14,7 @@
 - [x] 实现SiLU和SwiGLU的FFN层；
 - [x] 实现RoPE编码；
 - [x] 实现softmax函数；
-- [ ] 实现缩放点积注意力；
+- [x] 实现缩放点积注意力；
 - [ ] 实现多头自注意力；
 - [ ] 实现transformer块；
 - [ ] 搭建完整的transformer语言模型；
