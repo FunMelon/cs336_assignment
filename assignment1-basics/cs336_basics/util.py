@@ -1,7 +1,7 @@
 # 工具函数
 import torch
 import math
-
+from collections.abc import Iterable
 
 def SiLU(x: torch.Tensor) -> torch.Tensor:
     """
@@ -126,3 +126,22 @@ def cosine_anneal_schedule(
         lr = min_lr
         
     return lr
+
+
+def gradient_clipping(
+    parameters: Iterable[torch.nn.Parameter],
+    max_norm: float,
+) -> None:
+    """
+    对模型参数进行梯度裁剪。
+    args:
+        parameters (torch.nn.Parameter): 模型参数。
+        max_norm (float): 最大梯度范数。
+    """
+    l2_norm = torch.sqrt(sum(p.grad.data.norm(2) ** 2 for p in parameters if p.grad is not None)) # type: ignore
+
+    if l2_norm > max_norm:  # 超过最大范数则进行裁剪
+        clip_coef = max_norm / (l2_norm + 1e-6)
+        for p in parameters:
+            if p.grad is not None:
+                p.grad.data.mul_(clip_coef)

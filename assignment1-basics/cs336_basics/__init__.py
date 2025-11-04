@@ -13,6 +13,7 @@ try:
         scaled_dot_product_attention,
         cross_entropy_loss,
         cosine_anneal_schedule,
+        gradient_clipping,
     )
     from .optimizer import AdamW
     from .module import (
@@ -45,6 +46,7 @@ try:
         "cross_entropy_loss",
         "AdamW",
         "cosine_anneal_schedule",
+        "gradient_clipping",
     ]
 
 except Exception:
