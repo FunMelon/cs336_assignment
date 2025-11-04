@@ -1,5 +1,6 @@
 # 工具函数
 import torch
+import math
 
 
 def SiLU(x: torch.Tensor) -> torch.Tensor:
@@ -88,3 +89,40 @@ def get_perplexity(loss: torch.Tensor) -> torch.Tensor:
         torch.Tensor: 困惑度值。
     """
     return torch.exp(loss).mean()
+
+
+def cosine_anneal_schedule(
+    current_step: int,
+    max_lr: float,
+    min_lr: float,
+    warmup_steps: int,
+    cosine_anneal_steps: int,
+) -> float:
+    """
+    计算余弦退火学习率调度。
+    args:
+        current_step (int): 当前训练步骤。
+        max_lr (float): 最大学习率。
+        min_lr (float): 最小学习率。
+        warmup_steps (int): 预热步骤数。
+        cosine_anneal_steps (int): 余弦退火步骤数。
+    returns:
+        float: 计算得到的学习率。
+    """
+    if current_step < warmup_steps:  # 预热阶段
+        lr = max_lr * (current_step / warmup_steps)
+    elif (
+        current_step >= warmup_steps and current_step < cosine_anneal_steps
+    ):  # 余弦退火阶段
+        lr = min_lr + 0.5 * (max_lr - min_lr) * (
+            1
+            + math.cos(
+                math.pi
+                * (current_step - warmup_steps)
+                / (cosine_anneal_steps - warmup_steps)
+            )
+        )
+    else:  # 结束阶段
+        lr = min_lr
+        
+    return lr

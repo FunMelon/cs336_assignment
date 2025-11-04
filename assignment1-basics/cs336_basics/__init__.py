@@ -12,6 +12,7 @@ try:
         softmax,
         scaled_dot_product_attention,
         cross_entropy_loss,
+        cosine_anneal_schedule,
     )
     from .optimizer import AdamW
     from .module import (
@@ -43,6 +44,7 @@ try:
         "Transformer",
         "cross_entropy_loss",
         "AdamW",
+        "cosine_anneal_schedule",
     ]
 
 except Exception:

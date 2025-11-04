@@ -23,6 +23,7 @@
 - [x] 实现transformer块；
 - [x] 搭建完整的transformer语言模型；
 - [x] 实现模型的参数量估计函数和计算量估计函数；
+- [ ] 修正存在错误的显存和FLOPs计算函数
 
 ### 训练Transformer语言模型
 - [x] 实现交叉熵函数；
