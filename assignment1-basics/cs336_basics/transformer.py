@@ -93,7 +93,7 @@ class Transformer(torch.nn.Module):
 
         return total_params
 
-    def compute_flops(self, batch_size: int = 1, k_soft: int = 5) -> int:
+    def compute_forward_flops(self, batch_size: int = 1, k_soft: int = 5) -> int:
         """
         计算模型在最大长度下的前向传播 FLOPs（近似值）。（AI生成）
         参数:
@@ -191,6 +191,37 @@ class Transformer(torch.nn.Module):
         total_memory = param_memory + grad_memory + optim_memory + activation_memory
 
         return int(total_memory)
+
+    def compute_backward_flops(self, batch_size: int = 1) -> int:
+        """
+        计算模型在最大长度下的反向传播 FLOPs（近似值）。
+        参数:
+            batch_size: 批大小（默认为1）
+        返回:
+            int: 反向传播的总 FLOPs（近似）
+        假设:
+        - 反向传播 FLOPs 约为前向传播的两倍
+        """
+        forward_flops = self.compute_forward_flops(batch_size)
+        backward_flops = 2 * forward_flops
+        return int(backward_flops)
+    
+    def compute_adamw_flops(self, batch_size: int = 1) -> int:
+        """
+        计算运行一个步骤的 AdamW 所需的 FLOPs（近似值）。
+        参数:
+            batch_size: 批大小（默认为1）
+        返回:
+            int: AdamW 优化器的 FLOPs（近似）
+        假设:
+        - 每个参数有一个梯度
+        - 每个参数都有一阶矩 m 和二阶矩 v
+        """
+        total_params = self.compute_params()
+        # 每个参数的 FLOPs 估计
+        flops_per_param = 8  # 计算 m, v 更新和参数更新的近似 FLOPs
+        total_flops = total_params * flops_per_param
+        return int(total_flops)
 
     def __str__(self) -> str:
         """返回Transformer模型的字符串表示形式。"""
