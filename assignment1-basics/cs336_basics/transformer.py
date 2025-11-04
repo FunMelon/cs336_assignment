@@ -94,26 +94,57 @@ class Transformer(torch.nn.Module):
 
         return total_params
 
-    def compute_flops(self) -> int:
-        """计算模型在最大长度下的前向传播 FLOPs。（AI生成代码，正确性待验证）
-        returns:
-            int: 前向传播的 FLOPs。
+    def compute_flops(self, batch_size: int = 1, k_soft: int = 5) -> int:
         """
+        计算模型在最大长度下的前向传播 FLOPs（近似值）。（AI生成）
+        参数:
+            batch_size: 批大小（默认为1）
+            k_soft: softmax 每元素的常数开销估计（通常取 5~10，可调整）
+        返回:
+            int: 总 FLOPs（近似）
+        假设:
+        - QKV 合并线性 (D -> 3D)
+        - attention 中 QK^T 和 A@V 各为 2*B*L^2*d_model 总项中的 2*...
+        - FFN 按 SwiGLU/常见实现近似为 6 * B * L * D * F
+        """
+        B = int(batch_size)
+        L = int(self.context_length)
+        D = int(self.d_model)
+        F = int(self.d_ff)
+        N = int(self.num_layers)
+        H = int(self.nhead)
+        V = int(self.vocab_size)
 
-        # Attention
-        flops_attn = 8 * self.context_length**2 * self.d_model + 8 * self.context_length * self.d_model**2
+        # QKV 投影: 2 * B * L * D * (3D) = 6 * B * L * D^2
+        flops_qkv = 6 * B * L * D * D
 
-        # FFN
-        flops_ffn = 6 * self.context_length * self.d_model * self.d_ff
+        # QK^T: 2 * B * H * L^2 * d_k  where d_k = D / H  => simplifies to 2 * B * L^2 * D
+        flops_qk = 2 * B * (L ** 2) * D
+
+        # softmax 行为近似成本: k_soft * B * H * L^2
+        flops_softmax = k_soft * B * H * (L ** 2)
+
+        # A @ V: same cost as QK^T
+        flops_av = 2 * B * (L ** 2) * D
+
+        # attention 输出线性 proj: 2 * B * L * D^2
+        flops_outproj = 2 * B * L * D * D
+
+        # attention 总和（每层）
+        flops_attn_per_layer = flops_qkv + flops_qk + flops_softmax + flops_av + flops_outproj
+
+        # FFN（SwiGLU 风格近似）: 6 * B * L * D * F
+        flops_ffn_per_layer = 6 * B * L * D * F
 
         # 每层总 FLOPs
-        flops_per_layer = flops_attn + flops_ffn
+        flops_per_layer = flops_attn_per_layer + flops_ffn_per_layer
 
         # 所有层
-        total_flops = self.num_layers * flops_per_layer
+        total_flops = N * flops_per_layer
 
-        # 输出层
-        flops_output = 2 * self.context_length * self.d_model * self.vocab_size
-
+        # lm_head（输出层）: 2 * B * L * D * V
+        flops_output = 2 * B * L * D * V
         total_flops += flops_output
-        return total_flops
+
+        return int(total_flops)
+        
