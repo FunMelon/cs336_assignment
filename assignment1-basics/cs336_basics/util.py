@@ -54,3 +54,22 @@ def scaled_dot_product_attention(
     attn_weights = softmax(scores, dim=-1)
     output = torch.matmul(attn_weights, value)
     return output
+
+def cross_entropy_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    """
+    计算交叉熵损失。
+    args:
+        predictions (torch.Tensor): 预测概率分布，形状为 (batch_size, num_classes)。
+        targets (torch.Tensor): 真实标签，形状为 (batch_size,)。
+    returns:
+        torch.Tensor: 交叉熵损失值。
+    """
+    x_max = predictions.max(dim=1, keepdim=True).values
+    log_sum_exp = torch.log(torch.sum(torch.exp(predictions - x_max), dim=1, keepdim=True)) + x_max  # 稳定的log-sum-exp计算
+    log_probs = predictions - log_sum_exp   # 取对数除法变为减法
+    loss = -log_probs[torch.arange(predictions.size(0)), targets].mean()
+    
+    return loss

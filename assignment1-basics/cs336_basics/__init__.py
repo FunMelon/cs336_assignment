@@ -11,6 +11,7 @@ try:
         SiLU,
         softmax,
         scaled_dot_product_attention,
+        cross_entropy_loss,
     )
     from .module import (
         Linear,
@@ -39,6 +40,7 @@ try:
         "MultiheadSelfAttention",
         "TransformerBlock",
         "Transformer",
+        "cross_entropy_loss",
     ]
 
 except Exception:
