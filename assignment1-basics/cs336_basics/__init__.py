@@ -14,6 +14,7 @@ try:
         cross_entropy_loss,
         cosine_anneal_schedule,
         gradient_clipping,
+        get_batch,
     )
     from .optimizer import AdamW
     from .module import (
@@ -47,6 +48,7 @@ try:
         "AdamW",
         "cosine_anneal_schedule",
         "gradient_clipping",
+        "get_batch",
     ]
 
 except Exception:

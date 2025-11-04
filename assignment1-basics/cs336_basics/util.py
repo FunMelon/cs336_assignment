@@ -2,6 +2,8 @@
 import torch
 import math
 from collections.abc import Iterable
+import numpy.typing as npt
+
 
 def SiLU(x: torch.Tensor) -> torch.Tensor:
     """
@@ -124,7 +126,7 @@ def cosine_anneal_schedule(
         )
     else:  # 结束阶段
         lr = min_lr
-        
+
     return lr
 
 
@@ -138,10 +140,48 @@ def gradient_clipping(
         parameters (torch.nn.Parameter): 模型参数。
         max_norm (float): 最大梯度范数。
     """
-    l2_norm = torch.sqrt(sum(p.grad.data.norm(2) ** 2 for p in parameters if p.grad is not None)) # type: ignore
+    l2_norm = torch.sqrt(sum(p.grad.data.norm(2) ** 2 for p in parameters if p.grad is not None))  # type: ignore
 
     if l2_norm > max_norm:  # 超过最大范数则进行裁剪
         clip_coef = max_norm / (l2_norm + 1e-6)
         for p in parameters:
             if p.grad is not None:
                 p.grad.data.mul_(clip_coef)
+
+
+def get_batch(
+    dataset: npt.NDArray, batch_size: int, context_length: int, device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    从数据集中获取一个批次的数据。
+    args:
+        dataset (npt.NDArray): 输入数据集。
+        batch_size (int): 批次大小。
+        context_length (int): 上下文长度。
+        device (str): 设备类型（如 'cpu' 或 'cuda'）。
+    returns:
+        tuple[torch.Tensor, torch.Tensor]: 输入张量和目标张量。
+    """
+    dataset_length = dataset.shape[0]
+    start_indices = torch.randint(
+        0, dataset_length - context_length, (batch_size,)
+    )  # 随机选择起始索引
+
+    input_batch = torch.stack(
+        [
+            torch.tensor(dataset[start_idx : start_idx + context_length], device=device)
+            for start_idx in start_indices
+        ]
+    )
+
+    target_batch = torch.stack(
+        [
+            torch.tensor(
+                dataset[start_idx + 1 : start_idx + context_length + 1],
+                device=device,
+            )
+            for start_idx in start_indices
+        ]
+    )
+
+    return input_batch, target_batch
