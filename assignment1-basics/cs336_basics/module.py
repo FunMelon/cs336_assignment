@@ -232,7 +232,7 @@ class RoPE(torch.nn.Module):
         )  # 注册为非持久buffer（不保存在state_dict中）
         self.register_buffer("cos", cos, persistent=False)
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+    def rotation(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
         前向传播方法，应用旋转位置编码。
         args:
@@ -262,6 +262,7 @@ class MultiheadSelfAttention(torch.nn.Module):
         self,
         d_model: int,
         num_heads: int,
+        rope: RoPE | None = None,
         device=None,
         dtype=None,
     ):
@@ -272,6 +273,7 @@ class MultiheadSelfAttention(torch.nn.Module):
             num_heads (int): 注意力头的数量。
             device (torch.device | None): 参数所在的设备。
             dtype (torch.dtype | None): 参数的数据类型。
+            rope (RoPE | None): 可选的RoPE位置编码模块。
         """
         super().__init__()
         assert (
@@ -281,32 +283,36 @@ class MultiheadSelfAttention(torch.nn.Module):
         self.num_heads = num_heads
         self.d_k = d_model // num_heads # d_k = d_v = d_model / num_heads
 
-        self.q_linear = Linear(d_model, d_model, device, dtype)
-        self.k_linear = Linear(d_model, d_model, device, dtype)
-        self.v_linear = Linear(d_model, d_model, device, dtype)
+        self.qkv_linear = Linear(d_model, d_model * 3, device, dtype)   # 一次性生成Q、K、V
         self.out_linear = Linear(d_model, d_model, device, dtype)
+
+        self.rope = rope
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
         """
         前向传播方法，计算多头自注意力的输出。
         args:
             x (torch.Tensor): 输入张量，形状为 (batch_size, seq_len, d_model)。
+            token_positions (torch.Tensor | None): 位置索引张量，形状为 (..., seq_len)。
         returns:
             torch.Tensor: 输出张量，形状为 (batch_size, seq_len, d_model)。
         """
         batch_size, seq_len, _ = x.size()
 
+        
+        qkv = self.qkv_linear(x)  # (batch_size, seq_len, 3 * d_model)
+        Q, K, V = torch.chunk(qkv, 3, dim=-1)  # 各自 (batch_size, seq_len, d_model)
         # 线性变换并分割为多个头
-        Q = self.q_linear(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
-        K = self.k_linear(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
-        V = self.v_linear(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
+        Q = Q.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
+        K = K.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
+        V = V.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
 
         if token_positions is not None:
-            # 如果提供了token_positions，则应用RoPE位置编码
-            rope = RoPE(theta=10000, d_k=self.d_k, max_seq_len=seq_len, device=x.device)
-            Q = rope(Q, token_positions)
-            K = rope(K, token_positions)
-    
+            assert self.rope is not None, "RoPE module must be provided when token_positions is used."
+            # 应用RoPE位置编码
+            Q = self.rope.rotation(Q, token_positions)  # (batch_size, num_heads, seq_len, d_k)
+            K = self.rope.rotation(K, token_positions)  # (batch_size, num_heads, seq_len, d_k)
+
         # 创建下三角掩码以防止未来信息泄露
         mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).bool()  # (seq_len, seq_len)，上三角为False，下三角为True
 

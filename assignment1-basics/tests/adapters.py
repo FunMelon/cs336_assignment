@@ -161,10 +161,8 @@ def run_multihead_self_attention(
     """
     mha_layer = MultiheadSelfAttention(d_model, num_heads, None, None)
     mha_layer.load_state_dict({
-        'q_linear.weight': q_proj_weight,
-        'k_linear.weight': k_proj_weight,
-        'v_linear.weight': v_proj_weight,
-        'out_linear.weight': o_proj_weight
+        'qkv_linear.weight': torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0),
+        'out_linear.weight': o_proj_weight,
     })
     return mha_layer.forward(in_features)
 
@@ -206,12 +204,11 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    mha_layer = MultiheadSelfAttention(d_model, num_heads, None, None)
+    rope = RoPE(theta, d_model // num_heads, max_seq_len, in_features.device)
+    mha_layer = MultiheadSelfAttention(d_model, num_heads, rope)
     mha_layer.load_state_dict({
-        'q_linear.weight': q_proj_weight,
-        'k_linear.weight': k_proj_weight,
-        'v_linear.weight': v_proj_weight,
-        'out_linear.weight': o_proj_weight
+        'qkv_linear.weight': torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0),
+        'out_linear.weight': o_proj_weight,
     })
     return mha_layer.forward(in_features, token_positions)
 
@@ -235,7 +232,7 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    return RoPE(theta, d_k, max_seq_len, in_query_or_key.device).forward(in_query_or_key, token_positions)
+    return RoPE(theta, d_k, max_seq_len, in_query_or_key.device).rotation(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
