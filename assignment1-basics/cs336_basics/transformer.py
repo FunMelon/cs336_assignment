@@ -132,10 +132,10 @@ class Transformer(torch.nn.Module):
 
         # attention 总和（每层）
         flops_attn_per_layer = flops_qkv + flops_qk + flops_softmax + flops_av + flops_outproj
-
+        print("FLOPs per attention layer:", flops_attn_per_layer)
         # FFN（SwiGLU 风格近似）: 6 * B * L * D * F
         flops_ffn_per_layer = 6 * B * L * D * F
-
+        print("FLOPs per FFN layer:", flops_ffn_per_layer)
         # 每层总 FLOPs
         flops_per_layer = flops_attn_per_layer + flops_ffn_per_layer
 
@@ -144,6 +144,7 @@ class Transformer(torch.nn.Module):
 
         # lm_head（输出层）: 2 * B * L * D * V
         flops_output = 2 * B * L * D * V
+        print("FLOPs for output layer:", flops_output)
         total_flops += flops_output
 
         return int(total_flops)
