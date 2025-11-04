@@ -49,11 +49,12 @@ def scaled_dot_product_attention(
     )
 
     if mask is not None:
-        scores = scores.masked_fill(mask == False, float("-inf"))   # 使用掩码
+        scores = scores.masked_fill(mask == False, float("-inf"))  # 使用掩码
 
     attn_weights = softmax(scores, dim=-1)
     output = torch.matmul(attn_weights, value)
     return output
+
 
 def cross_entropy_loss(
     predictions: torch.Tensor,
@@ -68,8 +69,22 @@ def cross_entropy_loss(
         torch.Tensor: 交叉熵损失值。
     """
     x_max = predictions.max(dim=1, keepdim=True).values
-    log_sum_exp = torch.log(torch.sum(torch.exp(predictions - x_max), dim=1, keepdim=True)) + x_max  # 稳定的log-sum-exp计算
-    log_probs = predictions - log_sum_exp   # 取对数除法变为减法
+    log_sum_exp = (
+        torch.log(torch.sum(torch.exp(predictions - x_max), dim=1, keepdim=True))
+        + x_max
+    )  # 稳定的log-sum-exp计算
+    log_probs = predictions - log_sum_exp  # 取对数除法变为减法
     loss = -log_probs[torch.arange(predictions.size(0)), targets].mean()
-    
+
     return loss
+
+
+def get_perplexity(loss: torch.Tensor) -> torch.Tensor:
+    """
+    计算困惑度。
+    args:
+        loss (torch.Tensor): 交叉熵损失值。
+    returns:
+        torch.Tensor: 困惑度值。
+    """
+    return torch.exp(loss).mean()
