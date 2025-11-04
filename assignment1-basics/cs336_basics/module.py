@@ -1,8 +1,10 @@
 # 自实现的torch.nn.Module模块
 import torch
 from math import sqrt
-from .util import SiLU
-
+from .util import (
+    SiLU,
+    scaled_dot_product_attention,
+)
 
 class Linear(torch.nn.Module):
     """
@@ -231,6 +233,14 @@ class RoPE(torch.nn.Module):
         self.register_buffer("cos", cos, persistent=False)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播方法，应用旋转位置编码。
+        args:
+            x (torch.Tensor): 输入张量，形状为 (..., d_k)。
+            token_positions (torch.Tensor): 位置索引张量，形状为 (..., )。
+        returns:
+            torch.Tensor: 输出张量，形状为 (..., d_k)。
+        """
         sin = self.sin[token_positions]  # type: ignore
         cos = self.cos[token_positions]  # type: ignore
 
@@ -242,3 +252,71 @@ class RoPE(torch.nn.Module):
 
         return torch.stack((x_rot_even, x_rot_odd), dim=-1).flatten(-2)  # 先拼接后展平
 
+
+class MultiheadSelfAttention(torch.nn.Module):
+    """
+    继承自 torch.nn.Module 的自实现的多头自注意力模块
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        device=None,
+        dtype=None,
+    ):
+        """
+        初始化多头自注意力模块，创建查询、键、值和输出线性层。
+        args:
+            d_model (int): 输入和输出特征的维度。
+            num_heads (int): 注意力头的数量。
+            device (torch.device | None): 参数所在的设备。
+            dtype (torch.dtype | None): 参数的数据类型。
+        """
+        super().__init__()
+        assert (
+            d_model % num_heads == 0
+        ), "d_model must be divisible by num_heads"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads # d_k = d_v = d_model / num_heads
+
+        self.q_linear = Linear(d_model, d_model, device, dtype)
+        self.k_linear = Linear(d_model, d_model, device, dtype)
+        self.v_linear = Linear(d_model, d_model, device, dtype)
+        self.out_linear = Linear(d_model, d_model, device, dtype)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        前向传播方法，计算多头自注意力的输出。
+        args:
+            x (torch.Tensor): 输入张量，形状为 (batch_size, seq_len, d_model)。
+        returns:
+            torch.Tensor: 输出张量，形状为 (batch_size, seq_len, d_model)。
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # 线性变换并分割为多个头
+        Q = self.q_linear(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
+        K = self.k_linear(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
+        V = self.v_linear(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)  # (batch_size, num_heads, seq_len, d_k)
+
+        if token_positions is not None:
+            # 如果提供了token_positions，则应用RoPE位置编码
+            rope = RoPE(theta=10000, d_k=self.d_k, max_seq_len=seq_len, device=x.device)
+            Q = rope(Q, token_positions)
+            K = rope(K, token_positions)
+    
+        # 创建下三角掩码以防止未来信息泄露
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).bool()  # (seq_len, seq_len)，上三角为False，下三角为True
+
+        # 计算缩放点积注意力
+        attn_output = scaled_dot_product_attention(Q, K, V, mask)  # (batch_size, num_heads, seq_len, d_k)
+
+        # 拼接多个头的输出
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)  # (batch_size, seq_len, d_model)
+
+        # 最终线性变换
+        output = self.out_linear(attn_output)  # (batch_size, seq_len, d_model)
+
+        return output

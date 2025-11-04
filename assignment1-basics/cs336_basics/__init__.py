@@ -18,6 +18,7 @@ try:
         RMSNorm,
         PositionwiseFeedForward,
         RoPE,
+        MultiheadSelfAttention,
     )
 
     __version__ = version("cs336_basics")
@@ -33,6 +34,7 @@ try:
         "RoPE",
         "softmax",
         "scaled_dot_product_attention",
+        "MultiheadSelfAttention",
     ]
 
 except Exception:
