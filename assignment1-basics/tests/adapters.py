@@ -21,6 +21,7 @@ from cs336_basics import (
     scaled_dot_product_attention,
     MultiheadSelfAttention,
     TransformerBlock,
+    Transformer,
 )
 
 def run_linear(
@@ -400,7 +401,47 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    transformer = Transformer(
+        vocab_size,
+        context_length,
+        d_model,
+        num_heads,
+        num_layers,
+        d_ff,
+        device=None,
+        dtype=None
+    )
+    rope = RoPE(rope_theta, d_model // num_heads, context_length, in_indices.device)
+    transformer_blocks = torch.nn.ModuleList()
+    for layer_idx in range(num_layers):
+        block = TransformerBlock(
+            d_model,
+            num_heads,
+            d_ff,
+            rope=rope,
+            device=None,
+            dtype=None
+        )
+        block.load_state_dict({
+            'mhsa.qkv_linear.weight': torch.cat([
+                weights[f'layers.{layer_idx}.attn.q_proj.weight'],
+                weights[f'layers.{layer_idx}.attn.k_proj.weight'],
+                weights[f'layers.{layer_idx}.attn.v_proj.weight']
+            ], dim=0),
+            'mhsa.out_linear.weight': weights[f'layers.{layer_idx}.attn.output_proj.weight'],
+            'norm1.scale': weights[f'layers.{layer_idx}.ln1.weight'],
+            'ffn.linear1.weight': weights[f'layers.{layer_idx}.ffn.w1.weight'],
+            'ffn.linear2.weight': weights[f'layers.{layer_idx}.ffn.w2.weight'],
+            'ffn.linear3.weight': weights[f'layers.{layer_idx}.ffn.w3.weight'],
+            'norm2.scale': weights[f'layers.{layer_idx}.ln2.weight'],
+        })
+        transformer_blocks.append(block)
+    transformer.transformer_blocks = transformer_blocks
+    transformer.embedding.load_state_dict({'weight': weights['token_embeddings.weight']})
+    transformer.ln_final.load_state_dict({'scale': weights['ln_final.weight']})
+    transformer.lm_head.load_state_dict({'weight': weights['lm_head.weight']})
+
+    return transformer.forward(in_indices)
 
 
 def run_rmsnorm(

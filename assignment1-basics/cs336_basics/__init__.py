@@ -21,6 +21,7 @@ try:
         MultiheadSelfAttention,
         TransformerBlock,
     )
+    from .transformer import Transformer
 
     __version__ = version("cs336_basics")
     __all__ = [
@@ -37,6 +38,7 @@ try:
         "scaled_dot_product_attention",
         "MultiheadSelfAttention",
         "TransformerBlock",
+        "Transformer",
     ]
 
 except Exception:
