@@ -19,6 +19,7 @@ try:
         PositionwiseFeedForward,
         RoPE,
         MultiheadSelfAttention,
+        TransformerBlock,
     )
 
     __version__ = version("cs336_basics")
@@ -35,6 +36,7 @@ try:
         "softmax",
         "scaled_dot_product_attention",
         "MultiheadSelfAttention",
+        "TransformerBlock",
     ]
 
 except Exception:

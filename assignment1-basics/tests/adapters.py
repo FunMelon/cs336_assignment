@@ -20,6 +20,7 @@ from cs336_basics import (
     softmax,
     scaled_dot_product_attention,
     MultiheadSelfAttention,
+    TransformerBlock,
 )
 
 def run_linear(
@@ -305,7 +306,19 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    rope = RoPE(theta, d_model // num_heads, max_seq_len, in_features.device)
+    transformer_block = TransformerBlock(d_model, num_heads, d_ff, rope)
+    transformer_block.load_state_dict({
+        'mhsa.qkv_linear.weight': torch.cat([weights['attn.q_proj.weight'], weights['attn.k_proj.weight'], weights['attn.v_proj.weight']], dim=0),
+        'mhsa.out_linear.weight': weights['attn.output_proj.weight'],
+        'norm1.scale': weights['ln1.weight'],
+        'ffn.linear1.weight': weights['ffn.w1.weight'],
+        'ffn.linear2.weight': weights['ffn.w2.weight'],
+        'ffn.linear3.weight': weights['ffn.w3.weight'],
+        'norm2.scale': weights['ln2.weight'],
+    })
+    
+    return transformer_block.forward(in_features)
 
 
 def run_transformer_lm(
@@ -332,7 +345,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
