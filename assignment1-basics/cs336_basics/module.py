@@ -183,7 +183,9 @@ class PositionwiseFeedForward(torch.nn.Module):
             dtype (torch.dtype | None): 参数的数据类型。
         """
         super().__init__()
-        assert d_ff % 64 == 0, f"d_ff ({d_ff}) must be a multiple of 64 for efficient computation." # 确保d_ff是64的倍数以提高计算效率（CUDA的warp大小）
+        assert (
+            d_ff % 64 == 0
+        ), f"d_ff ({d_ff}) must be a multiple of 64 for efficient computation."  # 确保d_ff是64的倍数以提高计算效率（CUDA的warp大小）
         self.linear1 = Linear(d_model, d_ff, device, dtype)
         self.linear2 = Linear(d_ff, d_model, device, dtype)
         self.linear3 = Linear(d_model, d_ff, device, dtype)
@@ -217,6 +219,7 @@ class RoPE(torch.nn.Module):
     """
     继承自 torch.nn.Module 的自实现的旋转位置编码模块
     """
+
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
         """
         初始化旋转位置编码模块，将正弦和余弦位置编码注册为buffer。
@@ -227,25 +230,57 @@ class RoPE(torch.nn.Module):
             device (torch.device | None): 参数所在的设备。
         """
         super().__init__()
-        position = torch.arange(max_seq_len, device=device).unsqueeze(1) # 位置索引，形状为 (max_seq_len, 1)
+        position = torch.arange(max_seq_len, device=device).unsqueeze(
+            1
+        )  # 位置索引，形状为 (max_seq_len, 1)
         div_term = torch.exp(
-            torch.arange(0, d_k, 2, device=device) * (-torch.log(torch.tensor(theta)) / d_k)
-        )   # exp((i) * (-log θ / d_k)) = θ^(-i / d_k) = 1 / θ^(i / d_k)，形状为 (d_k/2, )
+            torch.arange(0, d_k, 2, device=device)
+            * (-torch.log(torch.tensor(theta)) / d_k)
+        )  # exp((i) * (-log θ / d_k)) = θ^(-i / d_k) = 1 / θ^(i / d_k)，形状为 (d_k/2, )
 
         sin = torch.sin(position * div_term)
         cos = torch.cos(position * div_term)
 
-        self.register_buffer("sin", sin, persistent=False) # 注册为非持久buffer（不保存在state_dict中）
+        self.register_buffer(
+            "sin", sin, persistent=False
+        )  # 注册为非持久buffer（不保存在state_dict中）
         self.register_buffer("cos", cos, persistent=False)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        sin = self.sin[token_positions] # type: ignore
-        cos = self.cos[token_positions] # type: ignore
+        sin = self.sin[token_positions]  # type: ignore
+        cos = self.cos[token_positions]  # type: ignore
 
         x_even = x[..., 0::2]
-        x_odd  = x[..., 1::2]
+        x_odd = x[..., 1::2]
 
         x_rot_even = x_even * cos - x_odd * sin
-        x_rot_odd  = x_even * sin + x_odd * cos
+        x_rot_odd = x_even * sin + x_odd * cos
 
         return torch.stack((x_rot_even, x_rot_odd), dim=-1).flatten(-2)  # 先拼接后展平
+
+
+class softmax(torch.nn.Module):
+    """
+    继承自 torch.nn.Module 的自实现的Softmax模块
+    """
+
+    def __init__(self, dim: int):
+        """
+        初始化Softmax层，指定归一化的维度。
+        args:
+            dim (int): 归一化的维度。
+        """
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播方法，计算Softmax。
+        args:
+            x (torch.Tensor): 输入张量。
+        returns:
+            torch.Tensor: 输出张量，应用Softmax后的结果。
+        """
+        max_val = x.max(dim=self.dim, keepdim=True).values  # 保留维度以便广播
+        exp_x = torch.exp(x - max_val)
+        return exp_x / exp_x.sum(dim=self.dim, keepdim=True)

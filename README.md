@@ -13,7 +13,7 @@
 - [x] 实现RMSNorm；
 - [x] 实现SiLU和SwiGLU的FFN层；
 - [x] 实现RoPE编码；
-- [ ] 实现softmax函数；
+- [x] 实现softmax函数；
 - [ ] 实现缩放点积注意力；
 - [ ] 实现多头自注意力；
 - [ ] 实现transformer块；
