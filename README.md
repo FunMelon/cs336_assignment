@@ -20,7 +20,7 @@
 - [ ] 实现MQA；
 - [ ] 实现MLA；
 - [x] 实现transformer块；
-- [ ] 搭建完整的transformer语言模型；
+- [x] 搭建完整的transformer语言模型；
 
 ### 训练Transformer语言模型
 - [ ] 实现交叉熵函数；
