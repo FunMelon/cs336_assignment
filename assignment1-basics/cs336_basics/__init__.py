@@ -13,6 +13,7 @@ try:
         scaled_dot_product_attention,
         cross_entropy_loss,
     )
+    from .optimizer import AdamW
     from .module import (
         Linear,
         Embedding,
@@ -41,6 +42,7 @@ try:
         "TransformerBlock",
         "Transformer",
         "cross_entropy_loss",
+        "AdamW",
     ]
 
 except Exception:
