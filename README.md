@@ -1,5 +1,12 @@
 # CS336的课后作业
 ## A1 构建 Transformer LM 模型
+- `assignment1-basics/cs336_basics/bpe/bpe_trainer.py`: 并行分词器训练脚本；
+- `assignment1-basics/cs336_basics/bpe/streaming_bpe_trainer.py`: 流式分词器训练脚本；
+- `assignment1-basics/text_compression_ratio.py`: 压缩率测试脚本；
+- `assignment1-basics/text2int.py`: 字符数据集转id数据集的脚本；
+- `assignment1-basics/train.py`: LM训练脚本；
+- `assignment1-basics/inference.py`: 推理对话脚本；
+
 ### BPE编码器
 - [x] 实现bpe编码器的训练逻辑；
 - [x] 实现并行的预分词过程（无法通过测试代码可以尝试改小并行进程数）；
@@ -44,3 +51,4 @@
 
 ### 实验
 - [x] 实现日志检查和损失曲线绘制功能；
+- [x] 实现推理功能；
