@@ -14,6 +14,7 @@ class Transformer(torch.nn.Module):
         nhead: int,
         num_layers: int,
         d_ff: int,
+        rope_theta: float = 10000.0,
         tokenizer: Tokenizer | None = None,
         device=None,
         dtype=None,
@@ -42,7 +43,7 @@ class Transformer(torch.nn.Module):
         self.dtype = dtype == None and torch.float32 or dtype
 
         rope = RoPE(
-            theta=10000.0,
+            theta=rope_theta,
             d_k=d_model // nhead,
             max_seq_len=context_length,
             device=device,
