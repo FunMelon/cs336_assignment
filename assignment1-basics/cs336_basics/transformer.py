@@ -73,14 +73,25 @@ class Transformer(torch.nn.Module):
         logits = self.lm_head(x)  # 形状为 (batch_size, sequence_length, vocab_size)
         return logits
 
-    def generate_text(self, prompts: str, max_length: int) -> str:
+    def generate_text(self, prompts: str, temperature: float = 1.0, top_p: float = 1.0, max_length: int | None = None) -> str:
         """生成文本。
         args:
             prompts (str): 输入的提示文本。
+            temperature (float): 生成文本的温度参数。
+            top_p (float): top-p 采样的累计概率阈值。
             max_length (int): 生成的最大长度。
         returns:
             str: 生成的文本。
         """
+        
+        assert temperature > 0, "Temperature must be greater than 0."
+        if max_length is None:
+            max_length = self.context_length
+        elif max_length > self.context_length:
+            raise ValueError("max_length cannot be greater than context_length.")
+        elif max_length <= 0:
+            raise ValueError("max_length must be a positive integer.")
+
         if self.tokenizer is None:
             raise ValueError("Tokenizer is not provided for text generation.")
         
@@ -94,10 +105,26 @@ class Transformer(torch.nn.Module):
             ]   # 获取特殊标记的ID列表
             for _ in range(max_length):
                 logits = self.forward(input_ids)
-                next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                scaled_logits = logits[:, -1, :] / temperature  # 使用温度缩放
+                probs = softmax(scaled_logits, dim=-1)
+
+                if top_p < 1.0:
+                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+                    sorted_indices_to_remove = cumulative_probs > top_p     # 标记要移除的标记
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()  # 将布尔标记整体右移一位
+                    sorted_indices_to_remove[..., 0] = False  # 保留至少一个标记
+
+                    # 将超过 top_p 的概率设为0
+                    probs[sorted_indices] = probs[sorted_indices] * (~sorted_indices_to_remove)
+                    # 重新归一化
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+
+                next_token = torch.multinomial(probs, num_samples=1)  # 随机采样下一个标记
+
                 if special_tokens_ids and next_token.item() in special_tokens_ids:  # 输出特殊标记则停止生成
                         break
-                
                 input_ids = torch.cat([input_ids, next_token], dim=1)
 
         return self.tokenizer.decode(input_ids.squeeze().tolist())
