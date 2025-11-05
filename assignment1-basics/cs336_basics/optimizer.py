@@ -38,7 +38,7 @@ class AdamW(torch.optim.Optimizer):
     """实现 AdamW 优化器。"""
 
     def __init__(
-        self, params, lr=1e-3, betas=(0.9, 0.95), eps=1e-8, weight_decay=1e-2
+        self, params, lr=1e-3, betas=(0.9, 0.95), eps=1e-8, weight_decay=1e-2, device=None
     ):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -54,6 +54,20 @@ class AdamW(torch.optim.Optimizer):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
+
+    def to(self, device: torch.device | str, dtype: torch.dtype) -> None:
+        """将优化器的状态移动到指定的设备和数据类型。
+        args:
+            device (torch.device): 目标设备。
+            dtype (torch.dtype): 目标数据类型。
+        """
+        for state in self.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device=device, dtype=dtype)
+
+
+    @torch.no_grad()
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
         """进行单次优化步骤。
         args:
@@ -72,7 +86,7 @@ class AdamW(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
 
-                grad = p.grad.data
+                grad = p.grad  # .data会绕过autograd
                 state = self.state[p]
 
                 if len(state) == 0:  # 初始化状态
@@ -87,13 +101,17 @@ class AdamW(torch.optim.Optimizer):
                 m.mul_(beta1).add_(grad, alpha=1 - beta1)  # 直接修改以节省内存
                 v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
                 # 计算偏差修正后的学习率
-                adapted_lr = (
-                    lr * math.sqrt(1 - beta2**t) / (1 - beta1**t)
-                )
-                # 更新参数
-                p.data -= adapted_lr * m / v.sqrt().add_(eps)
+                bias_correction1 = 1 - beta1 ** t 
+                bias_correction2 = 1 - beta2 ** t
+                adapted_lr = lr * math.sqrt(bias_correction2) / bias_correction1
+
+                # Adam参数更新
+                denom = v.sqrt().add(eps)
+                p.data.addcdiv_(m, denom, value=-adapted_lr)
+
                 # 应用权重衰减
-                p.data -= lr * weight_decay * p.data
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
 
         return loss
 
