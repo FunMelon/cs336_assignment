@@ -15,6 +15,8 @@ try:
         cosine_anneal_schedule,
         gradient_clipping,
         get_batch,
+        save_checkpoint,
+        load_checkpoint,
     )
     from .optimizer import AdamW
     from .module import (
@@ -49,6 +51,8 @@ try:
         "cosine_anneal_schedule",
         "gradient_clipping",
         "get_batch",
+        "save_checkpoint",
+        "load_checkpoint",
     ]
 
 except Exception:

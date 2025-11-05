@@ -3,6 +3,8 @@ import torch
 import math
 from collections.abc import Iterable
 import numpy.typing as npt
+import os
+import typing
 
 
 def SiLU(x: torch.Tensor) -> torch.Tensor:
@@ -185,3 +187,46 @@ def get_batch(
     )
 
     return input_batch, target_batch
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+) -> None:
+    """
+    保存模型检查点。
+    args:
+        model (torch.nn.Module): 模型。
+        optimizer (torch.optim.Optimizer): 优化器。
+        iteration (int): 当前迭代次数。
+        out (str | os.PathLike | typing.BinaryIO | typing.IO[bytes]): 保存路径或文件对象。
+    """
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "iteration": iteration,
+    }
+    torch.save(checkpoint, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    """
+    加载模型检查点。
+    args:
+        src (str | os.PathLike | typing.BinaryIO | typing.IO[bytes]): 检查点路径或文件对象。
+        model (torch.nn.Module): 模型。
+        optimizer (torch.optim.Optimizer): 优化器。
+    returns:
+        int: 加载的迭代次数。
+    """
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    iteration = checkpoint["iteration"]
+    return iteration
