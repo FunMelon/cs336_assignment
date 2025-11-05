@@ -5,6 +5,8 @@ import tqdm
 import time
 import os
 import csv
+import matplotlib.pyplot as plt
+import pandas as pd
 from cs336_basics import (
     Transformer,
     AdamW,
@@ -58,6 +60,7 @@ opt = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 os.makedirs(output_path, exist_ok=True)
 timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
 out_dir = os.path.join(output_path, f"{timestamp}")
+os.makedirs(out_dir, exist_ok=True)
 checkpoint_path = os.path.join(out_dir, "checkpoint.pth")
 # 创建日志文件，写入表头
 log_path = os.path.join(out_dir, "log.csv")
@@ -113,6 +116,19 @@ def save_log(
             ]
         )
 
+def plot_logs(log_path: str, output_dir: str) -> None:
+    """绘制训练和验证损失曲线"""
+    df = pd.read_csv(log_path)
+    plt.figure()
+    plt.plot(df['step'], df['train_loss'], label='Train Loss')
+    plt.plot(df['step'], df['val_loss'], label='Validation Loss')
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss over Iterations')
+    plt.legend()
+    plt.grid()
+    plt.savefig(os.path.join(output_dir, 'loss_curve.png'))
+    plt.close()
 
 if __name__ == "__main__":
     # 加载checkpoint（如果存在）
@@ -196,6 +212,9 @@ if __name__ == "__main__":
                 val_loss=val_loss,
                 lr=current_lr,
             )
+
+            # 保存损失曲线图
+            plot_logs(log_path, out_dir)
 
             if (
                 iter + 1
