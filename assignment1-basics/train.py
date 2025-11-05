@@ -17,12 +17,12 @@ from cs336_basics import (
 )
 
 # 训练循环超参数
-output_path = "./saves"
+output_path = "./out"
 checkpoint_path = ""
 train_dataset_path = "./data/id/ts-t-id/TinyStoriesV2-GPT4-train.bin"
 valid_dataset_path = "./data/id/ts-v-id/TinyStoriesV2-GPT4-valid.bin"
-iteration = 1000
-batch_size = 32
+iteration = 20000
+batch_size = 64
 saving_interval = 100
 valid_frequency = 100
 valid_batch_multiples = 5
@@ -30,17 +30,17 @@ valid_batch_multiples = 5
 vocab_size = 10000
 context_length = 256
 d_model = 512
-nhead = 8
-num_layers = 6
+nhead = 16
+num_layers = 4
 d_ff = 1344
 rope_theta = 10000.0
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
 # 余弦退火学习率参数
-max_lr = 1e-4
-min_lr = 1e-5
-warmup_steps = 100
-cosine_anneal_steps = 1000
+max_lr = 3e-4
+min_lr = 1e-6
+warmup_steps = 1000
+cosine_anneal_steps = 20000
 # 梯度裁剪参数
 max_grad_norm = 1.0
 
@@ -88,6 +88,11 @@ def evaluate_validation_loss(
                 context_length=context_length,
                 device=device,
             )
+            input_batch = input_batch.to(
+                dtype=torch.int
+            )  # 转换为整型，以匹配嵌入层要求
+            target_batch = target_batch.to(dtype=torch.int)
+
             logits = model(input_batch)
             val_loss = cross_entropy_loss(logits, target_batch)
             losses.append(val_loss.item())
@@ -116,21 +121,30 @@ def save_log(
             ]
         )
 
+
 def plot_logs(log_path: str, output_dir: str) -> None:
     """绘制训练和验证损失曲线"""
     df = pd.read_csv(log_path)
     plt.figure()
-    plt.plot(df['step'], df['train_loss'], label='Train Loss')
-    plt.plot(df['step'], df['val_loss'], label='Validation Loss')
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss over Iterations')
+    plt.plot(df["step"], df["train_loss"], label="Train Loss")
+    plt.plot(
+        df["step"], df["val_loss"].interpolate(), label="Validation Loss (interp)"
+    )  # 插值处理缺失值
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss over Iterations")
     plt.legend()
     plt.grid()
-    plt.savefig(os.path.join(output_dir, 'loss_curve.png'))
+    plt.savefig(os.path.join(output_dir, "loss_curve.png"))
     plt.close()
 
+
 if __name__ == "__main__":
+    print("Starting training...")
+    print(f"Model: {model}")
+    print(f"Using device: {device}")
+    print(f"Model parameters: {model.compute_params()}")
+    print(f"Output directory: {out_dir}")
     # 加载checkpoint（如果存在）
     start_iteration = 0
     try:
@@ -169,6 +183,10 @@ if __name__ == "__main__":
                 context_length=context_length,
                 device=device,
             )
+            input_batch = input_batch.to(
+                dtype=torch.int
+            )  # 转换为整型，以匹配嵌入层要求
+            target_batch = target_batch.to(dtype=torch.int)
 
             current_lr = cosine_anneal_schedule(  # 计算当前学习率
                 current_step=iter,
@@ -193,7 +211,9 @@ if __name__ == "__main__":
                     f"Iter {iter}, Loss: {loss.item():.4f}, LR: {current_lr:.6f}"
                 )
 
-            if (iter + 1) % valid_frequency == 0:
+            if (
+                iter == 0 or (iter + 1) % valid_frequency == 0 or iter == iteration - 1
+            ):  # 分别在第一次迭代、每valid_frequency次迭代和最后一次迭代时评估验证损失
                 val_loss = evaluate_validation_loss(
                     model,
                     valid_dataset,
@@ -215,6 +235,7 @@ if __name__ == "__main__":
 
             # 保存损失曲线图
             plot_logs(log_path, out_dir)
+            val_loss = None  # 重置验证损失以节省内存
 
             if (
                 iter + 1

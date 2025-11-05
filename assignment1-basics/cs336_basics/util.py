@@ -73,6 +73,10 @@ def cross_entropy_loss(
     returns:
         torch.Tensor: 交叉熵损失值。
     """
+    if predictions.dim() > 2:   # 处理多维情况，例如 (batch_size, seq_len, num_classes)
+        predictions = predictions.view(-1, predictions.size(-1))
+        targets = targets.view(-1)
+
     x_max = predictions.max(dim=1, keepdim=True).values
     log_sum_exp = (
         torch.log(torch.sum(torch.exp(predictions - x_max), dim=1, keepdim=True))
