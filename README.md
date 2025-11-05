@@ -34,11 +34,12 @@
 
 ### 训练循环
 - [x] 实现数据加载器；
-- [ ] 实现checkpointing的保存和加载；
-- [ ] 实现完整的训练脚本；
+- [x] 实现checkpointing的保存和加载；
+- [x] 实现完整的训练脚本；
 
 ### 生成文本
-- [ ] 搭建decoding过程；
+- [x] 搭建 generate text 过程；
+- [ ] 增加采样规则，实现top-k，top-p, temperature等功能
 
 ### 实验
 - [ ] 实现日志检查和损失曲线绘制功能；

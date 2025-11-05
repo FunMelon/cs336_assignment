@@ -1,7 +1,7 @@
 import torch
 from .module import TransformerBlock, Embedding, RoPE, Linear, RMSNorm
 from .util import softmax
-
+from .tokenizer import Tokenizer
 
 class Transformer(torch.nn.Module):
     """一个完整的Transformer模型类，包含嵌入层、多层Transformer块、归一化层和线性输出层。"""
@@ -14,6 +14,7 @@ class Transformer(torch.nn.Module):
         nhead: int,
         num_layers: int,
         d_ff: int,
+        tokenizer: Tokenizer | None = None,
         device=None,
         dtype=None,
     ):
@@ -25,6 +26,7 @@ class Transformer(torch.nn.Module):
             nhead (int): 多头注意力机制中的头数。
             num_layers (int): Transformer块的数量。
             d_ff (int): 前馈网络的隐藏层维度。
+            tokenizer (Tokenizer, optional): 分词器，用于生成文本输出。
             device: 设备信息（如 'cpu' 或 'cuda'）。
             dtype: 数据类型（如 torch.float32）。
         """
@@ -35,6 +37,7 @@ class Transformer(torch.nn.Module):
         self.nhead = nhead
         self.num_layers = num_layers
         self.d_ff = d_ff
+        self.tokenizer = tokenizer
         self.device = device == None and torch.device("cpu") or device
         self.dtype = dtype == None and torch.float32 or dtype
 
@@ -69,6 +72,36 @@ class Transformer(torch.nn.Module):
         x = self.ln_final(x)  # 形状为 (batch_size, sequence_length, d_model)
         logits = self.lm_head(x)  # 形状为 (batch_size, sequence_length, vocab_size)
         return logits
+
+    def generate_text(self, prompts: str, max_length: int) -> str:
+        """生成文本。
+        args:
+            prompts (str): 输入的提示文本。
+            max_length (int): 生成的最大长度。
+        returns:
+            str: 生成的文本。
+        """
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer is not provided for text generation.")
+        
+        self.eval() # 设置为评估模式
+        with torch.no_grad():
+            input_ids = torch.tensor(self.tokenizer.encode(prompts)).unsqueeze(0)  # 添加批次维度
+
+            special_tokens = self.tokenizer.special_tokens or []
+            special_tokens_ids = [
+                self.tokenizer.token2id[st.encode('utf-8')] for st in special_tokens
+            ]   # 获取特殊标记的ID列表
+            for _ in range(max_length):
+                logits = self.forward(input_ids)
+                next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                if special_tokens_ids and next_token.item() in special_tokens_ids:  # 输出特殊标记则停止生成
+                        break
+                
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+
+        return self.tokenizer.decode(input_ids.squeeze().tolist())
+    
 
     def compute_params(self) -> int:
         """计算模型的总参数数量。
