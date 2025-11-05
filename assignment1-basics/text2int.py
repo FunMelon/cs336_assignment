@@ -71,11 +71,11 @@ def saveID(input_path: str, save_dir: str, tokenizer: Tokenizer, chunk_size_mb=1
 
 
 if __name__ == "__main__":
-    tokenizer_tiny = Tokenizer.from_files("./data/vocab/owt/vocab.json", "./data/vocab/owt/merges.txt")
+    tokenizer_tiny = Tokenizer.from_files("./data/vocab/ts-t/vocab.json", "./data/vocab/ts-t/merges.txt", special_tokens=["<|endoftext|>"])
 
     saveID(
-        input_path="./data/owt_valid.txt",
+        input_path="./data/TinyStoriesV2-GPT4-train.txt",
         chunk_size_mb=16,
-        save_dir="./data/id/owt-t-id",
+        save_dir="./data/id/ts-t-id",
         tokenizer=tokenizer_tiny
     )
