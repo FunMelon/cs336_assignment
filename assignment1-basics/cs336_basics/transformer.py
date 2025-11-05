@@ -86,6 +86,8 @@ class Transformer(torch.nn.Module):
         """
         
         assert temperature > 0, "Temperature must be greater than 0."
+        if len(prompts) > self.context_length:
+            raise ValueError("Input prompt length exceeds model's context length.")
         if max_length is None:
             max_length = self.context_length
         elif max_length > self.context_length:
@@ -95,16 +97,16 @@ class Transformer(torch.nn.Module):
 
         if self.tokenizer is None:
             raise ValueError("Tokenizer is not provided for text generation.")
-        
+
         self.eval() # 设置为评估模式
         with torch.no_grad():
-            input_ids = torch.tensor(self.tokenizer.encode(prompts)).unsqueeze(0)  # 添加批次维度
-
+            input_ids = torch.tensor(self.tokenizer.encode(prompts), device=self.device).unsqueeze(0)  # 添加批次维度
+            
             special_tokens = self.tokenizer.special_tokens or []
             special_tokens_ids = [
                 self.tokenizer.token2id[st.encode('utf-8')] for st in special_tokens
             ]   # 获取特殊标记的ID列表
-            for _ in range(max_length):
+            for _ in range(max_length - input_ids.size(1)):
                 logits = self.forward(input_ids)
                 scaled_logits = logits[:, -1, :] / temperature  # 使用温度缩放
                 probs = softmax(scaled_logits, dim=-1)
@@ -118,16 +120,18 @@ class Transformer(torch.nn.Module):
                     sorted_indices_to_remove[..., 0] = False  # 保留至少一个标记
 
                     # 将超过 top_p 的概率设为0
-                    probs[sorted_indices] = probs[sorted_indices] * (~sorted_indices_to_remove)
+                    sorted_probs = sorted_probs.masked_fill(sorted_indices_to_remove, 0.0)
+
+                    # 将修改后的概率重新映射回原始索引位置
+                    probs.zero_().scatter_(1, sorted_indices, sorted_probs)
                     # 重新归一化
                     probs = probs / probs.sum(dim=-1, keepdim=True)
 
                 next_token = torch.multinomial(probs, num_samples=1)  # 随机采样下一个标记
-
                 if special_tokens_ids and next_token.item() in special_tokens_ids:  # 输出特殊标记则停止生成
-                        break
+                    break
                 input_ids = torch.cat([input_ids, next_token], dim=1)
-
+        
         return self.tokenizer.decode(input_ids.squeeze().tolist())
     
 
