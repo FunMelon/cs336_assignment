@@ -5,6 +5,7 @@
 - `assignment1-basics/text_compression_ratio.py`: 压缩率测试脚本；
 - `assignment1-basics/text2int.py`: 字符数据集转id数据集的脚本；
 - `assignment1-basics/train.py`: LM训练脚本；
+- `assignment1-basics/plot_loss.py`: 绘图脚本；
 - `assignment1-basics/inference.py`: 推理对话脚本；
 
 ### BPE编码器
