@@ -7,6 +7,7 @@
 - `assignment1-basics/train.py`: LM训练脚本；
 - `assignment1-basics/plot_loss.py`: 绘图脚本；
 - `assignment1-basics/inference.py`: 推理对话脚本；
+- `assignment1-basics/LR_range_test.py`: 学习率查找脚本；
 
 ### BPE编码器
 - [x] 实现bpe编码器的训练逻辑；
@@ -53,3 +54,4 @@
 ### 实验
 - [x] 实现日志检查和损失曲线绘制功能；
 - [x] 实现推理功能；
+- [x] 增加学习率查找脚本；

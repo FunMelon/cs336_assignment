@@ -1,4 +1,4 @@
-# 训练脚本
+# 学习率测试脚本
 import numpy as np
 import torch
 import tqdm
@@ -12,16 +12,13 @@ from cs336_basics import (
     AdamW,
     get_batch,
     cross_entropy_loss,
-    cosine_anneal_schedule,
     gradient_clipping,
 )
 
 # 训练循环超参数
 output_path = "./out"
-checkpoint_path = ""
 train_dataset_path = "./data/id/ts-t-id/TinyStoriesV2-GPT4-train.bin"
 valid_dataset_path = "./data/id/ts-v-id/TinyStoriesV2-GPT4-valid.bin"
-iteration = 20000
 batch_size = 64
 saving_interval = 100
 valid_frequency = 100
@@ -36,11 +33,10 @@ d_ff = 1344
 rope_theta = 10000.0
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
-# 余弦退火学习率参数
-max_lr = 5e-4
-min_lr = 1e-6
-warmup_steps = 1000
-cosine_anneal_steps = 20000
+# 学习率范围测试参数
+iteration = 1000
+lr_start = 1e-7
+lr_end = 1e-1
 # 梯度裁剪参数
 max_grad_norm = 1.0
 
@@ -116,7 +112,7 @@ def save_log(
                 step,
                 wallclock_time,
                 train_loss,
-                val_loss if val_loss is not None else "",
+                val_loss,
                 lr,
             ]
         )
@@ -127,9 +123,7 @@ def plot_logs(log_path: str, output_dir: str) -> None:
     df = pd.read_csv(log_path)
     plt.figure()
     plt.plot(df["step"], df["train_loss"], label="Train Loss")
-    plt.plot(
-        df["step"], df["val_loss"].interpolate(), label="Validation Loss (interp)"
-    )  # 插值处理缺失值
+    plt.plot(df["step"], df["val_loss"], label="Validation Loss")
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
     plt.title("Training and Validation Loss over Iterations")
@@ -140,21 +134,12 @@ def plot_logs(log_path: str, output_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    print("Starting training...")
+    print("Starting LR range test...")
     print(f"Model: {model}")
     print(f"Using device: {device}")
     print(f"Model parameters: {model.compute_params()}")
     print(f"Output directory: {out_dir}")
-    # 加载checkpoint（如果存在）
     start_iteration = 0
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        opt.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_iteration = checkpoint["iteration"]
-        print(f"Loaded checkpoint from iteration {start_iteration}")
-    except FileNotFoundError:
-        print("No checkpoint found, starting from scratch.")
     # 加载数据集
     train_dataset = np.memmap(
         train_dataset_path,
@@ -175,8 +160,7 @@ if __name__ == "__main__":
     model.train()  # 设置模型为训练模式
     with tqdm.tqdm(total=iteration, initial=start_iteration) as pbar:
         start_time = time.time()
-        val_loss = None  # 防止未定义错误
-        for iter in range(start_iteration, iteration):
+        for iter in range(iteration):
             input_batch, target_batch = get_batch(
                 train_dataset,
                 batch_size=batch_size,
@@ -188,13 +172,7 @@ if __name__ == "__main__":
             )  # 转换为整型，以匹配嵌入层要求
             target_batch = target_batch.to(dtype=torch.int)
 
-            current_lr = cosine_anneal_schedule(  # 计算当前学习率
-                current_step=iter,
-                warmup_steps=warmup_steps,
-                cosine_anneal_steps=cosine_anneal_steps,
-                max_lr=max_lr,
-                min_lr=min_lr,
-            )
+            current_lr = lr_start * (lr_end / lr_start) ** (iter / iteration)   # 指数增长学习率 
 
             for param_group in opt.param_groups:  # 更新优化器中的学习率
                 param_group["lr"] = current_lr
@@ -211,17 +189,14 @@ if __name__ == "__main__":
                     f"Iter {iter}, Loss: {loss.item():.4f}, LR: {current_lr:.6f}"
                 )
 
-            if (
-                iter == 0 or (iter + 1) % valid_frequency == 0 or iter == iteration - 1
-            ):  # 分别在第一次迭代、每valid_frequency次迭代和最后一次迭代时评估验证损失
-                val_loss = evaluate_validation_loss(
-                    model,
-                    valid_dataset,
-                    batch_size,
-                    context_length,
-                    device,
-                    valid_batch_multiples,
-                )
+            val_loss = evaluate_validation_loss(
+                model,
+                valid_dataset,
+                batch_size,
+                context_length,
+                device,
+                valid_batch_multiples,
+            )
 
             # 记录日志
             save_log(
@@ -236,17 +211,5 @@ if __name__ == "__main__":
             # 保存损失曲线图
             plot_logs(log_path, out_dir)
             val_loss = None  # 重置验证损失以节省内存
-
-            if (
-                iter + 1
-            ) % saving_interval == 0 or iter == iteration - 1:  # 保存checkpoint
-                torch.save(
-                    {
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": opt.state_dict(),
-                        "iteration": iter,
-                    },
-                    checkpoint_path,
-                )
 
             pbar.update(1)
