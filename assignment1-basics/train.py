@@ -37,7 +37,7 @@ rope_theta = 10000.0
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
 # 余弦退火学习率参数
-max_lr = 5e-4
+max_lr = 5e-3
 min_lr = 1e-6
 warmup_steps = 1000
 cosine_anneal_steps = 20000
@@ -116,7 +116,7 @@ def save_log(
                 step,
                 wallclock_time,
                 train_loss,
-                val_loss if val_loss is not None else "",
+                val_loss,
                 lr,
             ]
         )
@@ -125,11 +125,8 @@ def save_log(
 def plot_logs(log_path: str, output_dir: str) -> None:
     """绘制训练和验证损失曲线"""
     df = pd.read_csv(log_path)
-    plt.figure()
     plt.plot(df["step"], df["train_loss"], label="Train Loss")
-    plt.plot(
-        df["step"], df["val_loss"].interpolate(), label="Validation Loss (interp)"
-    )  # 插值处理缺失值
+    plt.plot(df["step"], df["val_loss"], label="Validation Loss")
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
     plt.title("Training and Validation Loss over Iterations")
@@ -175,7 +172,6 @@ if __name__ == "__main__":
     model.train()  # 设置模型为训练模式
     with tqdm.tqdm(total=iteration, initial=start_iteration) as pbar:
         start_time = time.time()
-        val_loss = None  # 防止未定义错误
         for iter in range(start_iteration, iteration):
             input_batch, target_batch = get_batch(
                 train_dataset,
@@ -213,7 +209,7 @@ if __name__ == "__main__":
 
             if (
                 iter == 0 or (iter + 1) % valid_frequency == 0 or iter == iteration - 1
-            ):  # 分别在第一次迭代、每valid_frequency次迭代和最后一次迭代时评估验证损失
+            ):  # 分别在第一次迭代、每valid_frequency次迭代和最后一次迭代时评估验证损失，记录日志和保存损失曲线图
                 val_loss = evaluate_validation_loss(
                     model,
                     valid_dataset,
@@ -223,19 +219,18 @@ if __name__ == "__main__":
                     valid_batch_multiples,
                 )
 
-            # 记录日志
-            save_log(
-                log_path,
-                step=iter + 1,
-                wallclock_time=time.time() - start_time,
-                train_loss=loss.item(),
-                val_loss=val_loss,
-                lr=current_lr,
-            )
+                # 记录日志
+                save_log(
+                    log_path,
+                    step=iter + 1,
+                    wallclock_time=time.time() - start_time,
+                    train_loss=loss.item(),
+                    val_loss=val_loss,
+                    lr=current_lr,
+                )
 
-            # 保存损失曲线图
-            plot_logs(log_path, out_dir)
-            val_loss = None  # 重置验证损失以节省内存
+                # 保存损失曲线图
+                plot_logs(log_path, out_dir)
 
             if (
                 iter + 1
