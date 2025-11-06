@@ -1,7 +1,8 @@
+# 加载和实现分词器
 from typing import Iterable, Iterator
 import regex as re
 import json
-from .bpe_trainer import bytes_to_unicode
+from .bpe.bpe_trainer import bytes_to_unicode
 
 _BYTE_ENCODER = bytes_to_unicode()
 _BYTE_DECODER = {v: k for k, v in _BYTE_ENCODER.items()}
