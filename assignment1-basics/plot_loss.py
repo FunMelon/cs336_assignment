@@ -2,12 +2,10 @@
 import matplotlib.pyplot as plt
 import pandas as pd
 
-csv_path = "./out/错误数据集上的结果/log.csv"
+csv_path = "./out/base/log.csv"
 output_path = "./out/plot.png"
 
-# 只保留 val_loss 不为空的行
 df = pd.read_csv(csv_path)
-df = df.dropna(subset=["val_loss"])
 plt.figure(figsize=(20, 12))
 plt.plot(df["step"], df["train_loss"], label="Train Loss", linewidth=1.5)
 plt.plot(df["step"], df["val_loss"], label="Validation Loss", linewidth=1.5)
