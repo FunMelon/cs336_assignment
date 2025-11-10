@@ -40,7 +40,7 @@ dtype = torch.float32
 # 余弦退火学习率参数
 max_lr = 5e-3
 min_lr = 1e-6
-warmup_ratio = 0.5
+warmup_ratio = 0.05
 cosine_anneal_steps = 20000
 # 梯度裁剪参数
 max_grad_norm = 1.0
