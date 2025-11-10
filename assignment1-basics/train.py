@@ -23,9 +23,10 @@ train_dataset_path = "./data/id/ts-t-id/TinyStoriesV2-GPT4-train.bin"
 valid_dataset_path = "./data/id/ts-v-id/TinyStoriesV2-GPT4-valid.bin"
 iteration = 20000
 batch_size = 64
-saving_interval = 100
+saving_interval = 1000
 valid_frequency = 100
 valid_batch_multiples = 5
+accumulation_steps = 2
 # 模型超参数
 vocab_size = 10000
 context_length = 256
@@ -39,10 +40,15 @@ dtype = torch.float32
 # 余弦退火学习率参数
 max_lr = 5e-3
 min_lr = 1e-6
-warmup_steps = 1000
+warmup_ratio = 0.5
 cosine_anneal_steps = 20000
 # 梯度裁剪参数
 max_grad_norm = 1.0
+# 优化器参数
+lr = 1e-3
+betas = (0.9, 0.95)
+eps = 1e-8
+weight_decay = 1e-2
 
 
 model = Transformer(
@@ -55,7 +61,7 @@ model = Transformer(
     device=device,
 )
 
-opt = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+opt = AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
 # 创建输出目录
 os.makedirs(output_path, exist_ok=True)
 timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
@@ -170,6 +176,7 @@ if __name__ == "__main__":
 
     # 训练循环
     model.train()  # 设置模型为训练模式
+    opt.zero_grad()  # 清空优化器梯度
     with tqdm.tqdm(total=iteration, initial=start_iteration) as pbar:
         start_time = time.time()
         for iter in range(start_iteration, iteration):
@@ -186,7 +193,7 @@ if __name__ == "__main__":
 
             current_lr = cosine_anneal_schedule(  # 计算当前学习率
                 current_step=iter,
-                warmup_steps=warmup_steps,
+                warmup_steps=int(warmup_ratio * cosine_anneal_steps),
                 cosine_anneal_steps=cosine_anneal_steps,
                 max_lr=max_lr,
                 min_lr=min_lr,
@@ -196,11 +203,13 @@ if __name__ == "__main__":
                 param_group["lr"] = current_lr
 
             logits = model(input_batch)  # 前向传播
-            loss = cross_entropy_loss(logits, target_batch)  # 计算损失
-            opt.zero_grad()  # 清空梯度
-            loss.backward()  # 反向传播
-            gradient_clipping(model.parameters(), max_norm=max_grad_norm)  # 梯度裁剪
-            opt.step()  # 优化器更新参数
+            loss = cross_entropy_loss(logits, target_batch) # 计算损失
+            loss_scaled = loss / accumulation_steps
+            loss_scaled.backward()  # 反向传播
+            if (iter + 1) % accumulation_steps == 0:
+                gradient_clipping(model.parameters(), max_norm=max_grad_norm)  # 梯度裁剪
+                opt.step()  # 优化器更新参数
+                opt.zero_grad()  # 清空梯度
 
             if iter % 10 == 0:  # 每10次迭代更新一次进度条，显示损失和学习率
                 pbar.set_description(
