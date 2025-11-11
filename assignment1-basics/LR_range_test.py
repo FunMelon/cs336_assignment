@@ -39,7 +39,11 @@ lr_start = 1e-7
 lr_end = 1e-1
 # 梯度裁剪参数
 max_grad_norm = 1.0
-
+# 优化器参数
+lr = 1e-3
+betas = (0.9, 0.999)
+eps = 1e-8
+weight_decay = 1e-2
 
 model = Transformer(
     vocab_size=vocab_size,
@@ -51,7 +55,7 @@ model = Transformer(
     device=device,
 )
 
-opt = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+opt = AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
 # 创建输出目录
 os.makedirs(output_path, exist_ok=True)
 timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
