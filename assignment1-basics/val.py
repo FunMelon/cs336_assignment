@@ -5,19 +5,19 @@ import torch
 from cs336_basics import Transformer, cross_entropy_loss, get_batch
 
 # 路径配置
-checkpoint_path = "./out/base/checkpoint.pth" 
-valid_dataset_path = "./data/id/ts-v-id/TinyStoriesV2-GPT4-valid.bin"
+checkpoint_path = "./out/owt/checkpoint.pth" 
+valid_dataset_path = "./data/id/owt-v-id/owt_valid.bin"
 
 # 模型超参数
-vocab_size = 10000
-context_length = 256
+vocab_size = 32000
+context_length = 512
 d_model = 512
 nhead = 16
 num_layers = 4
 d_ff = 1344
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
-batch_size = 64
+batch_size = 32
 
 
 valid_dataset = np.memmap(valid_dataset_path, dtype=np.uint16, mode="r")

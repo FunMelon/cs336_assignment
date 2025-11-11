@@ -4,18 +4,18 @@ import time
 from cs336_basics import Transformer, Tokenizer
 
 # 用户参数
-prompt = "Once upon a time"
-max_len = 256
+prompt = "As a leading expert in artificial intelligence,"
+max_len = 512
 temperature = 0.8
 top_p = 0.9
 # 加载参数
-checkpoint_path = "./out/base/checkpoint.pth"
-vocab_path = "./data/vocab/ts-t/vocab.json"
-merges_path = "./data/vocab/ts-t/merges.txt"
+checkpoint_path = "./out/owt/checkpoint.pth"
+vocab_path = "./data/vocab/owt-t/vocab.json"
+merges_path = "./data/vocab/owt-t/merges.txt"
 special_tokens = ["<|endoftext|>"]
 # 模型参数
-vocab_size = 10000
-context_length = 256
+vocab_size = 32000
+context_length = 512
 d_model = 512
 nhead = 16
 num_layers = 4

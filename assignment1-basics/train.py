@@ -19,17 +19,17 @@ from cs336_basics import (
 # 训练循环超参数
 output_path = "./out"
 checkpoint_path = ""
-train_dataset_path = "./data/id/ts-t-id/TinyStoriesV2-GPT4-train.bin"
-valid_dataset_path = "./data/id/ts-v-id/TinyStoriesV2-GPT4-valid.bin"
-iteration = 20000
-batch_size = 64
-saving_interval = 1000
-valid_frequency = 100
+train_dataset_path = "./data/id/owt-t-id/owt_train.bin"
+valid_dataset_path = "./data/id/owt-v-id/owt_valid.bin"
+iteration = 120000
+batch_size = 16
+saving_interval = 10000
+valid_frequency = 500
 valid_batch_multiples = 5
-accumulation_steps = 2
+accumulation_steps = 8
 # 模型超参数
-vocab_size = 10000
-context_length = 256
+vocab_size = 32000
+context_length = 512
 d_model = 512
 nhead = 16
 num_layers = 4
@@ -38,10 +38,10 @@ rope_theta = 10000.0
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
 # 余弦退火学习率参数
-max_lr = 5e-3
-min_lr = 1e-6
+max_lr = 2e-3
+min_lr = 2e-6
 warmup_ratio = 0.05
-cosine_anneal_steps = 20000
+cosine_anneal_steps = 120000
 # 梯度裁剪参数
 max_grad_norm = 1.0
 # 优化器参数
