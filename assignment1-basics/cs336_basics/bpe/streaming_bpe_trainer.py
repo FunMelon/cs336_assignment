@@ -4,6 +4,7 @@ from typing import BinaryIO, Iterator
 import regex as re  # 使用 regex 库，由于re对GPT-2的tokenization支持不好
 import json
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import time
 
@@ -129,11 +130,31 @@ def process_chunk_text(
     return local_freq
 
 
+def process_chunk_range(
+    args: tuple[int, int, str, list[str]]
+) -> dict[tuple[bytes, ...], int]:
+    """处理文件的[start, end)字节区间，返回局部预分词频率。
+
+    设计为可在多进程中运行：worker 自己打开文件并读取对应区间，
+    避免把大块 bytes/str 通过 pickle 在进程间传输。
+    """
+
+    start, end, input_path, special_tokens = args
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        data = f.read(end - start)
+    if not data:
+        return {}
+    text = data.decode("utf-8", errors="ignore")
+    return process_chunk_text(text, special_tokens)
+
+
 def bpe_streaming(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
     chunk_size_mb: int = 1024,
+    num_processes: int = 8,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
     训练BPE模型。
@@ -161,31 +182,44 @@ def bpe_streaming(
     CHUNK_SIZE = chunk_size_mb * 1024 * 1024
     chunk_num = max(1, stats.st_size // CHUNK_SIZE)
     print(f"The file size is {stats.st_size} bytes, splitting into {chunk_num} chunks.")
-    chunk_id = 0
+    available_cpus = os.cpu_count() or 1
+    num_processes = max(1, min(int(num_processes), available_cpus))
 
     print(f"Start streaming BPE training from {input_path}")
     pretokenize_start_time = time.time()
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, chunk_num, b"<|endoftext|>")
-        for i in range(len(boundaries) - 1):
-            f.seek(boundaries[i])
-            data = f.read(boundaries[i + 1] - boundaries[i])
-            if not data:
-                break
-            chunk_id += 1
-            text = data.decode("utf-8", errors="ignore")
-            local_freq = process_chunk_text(text, special_tokens)
 
-            # 合并局部统计到主字典
-            for k, v in local_freq.items():
-                pre_token2freq[k] += v
-            del local_freq  # 释放内存
+    chunk_count = max(0, len(boundaries) - 1)
+    if chunk_count == 0:
+        pretokenize_end_time = time.time()
+        print(
+            f"Finished preprocessing 0 chunks, total time cost: {pretokenize_end_time - pretokenize_start_time:.2f} seconds"
+        )
+    else:
+        print(f"Pre-tokenizing with {num_processes} processes across {chunk_count} chunks")
+        chunk_args = (
+            (boundaries[i], boundaries[i + 1], str(input_path), special_tokens)
+            for i in range(chunk_count)
+        )
 
-            print(
-                f"Processed chunk {chunk_id}, current token units: {len(pre_token2freq):,}, cost time: {time.time() - pretokenize_start_time:.2f} seconds"
-            )
+        with ProcessPoolExecutor(max_workers=num_processes) as ex:
+            for chunk_id, local_freq in enumerate(
+                ex.map(process_chunk_range, chunk_args, chunksize=1), start=1
+            ):
+                if local_freq:
+                    for k, v in local_freq.items():
+                        pre_token2freq[k] += v
+                # 释放 worker 返回的字典引用，降低峰值
+                del local_freq
+
+                print(
+                    f"Processed chunk {chunk_id}, current token units: {len(pre_token2freq):,}, cost time: {time.time() - pretokenize_start_time:.2f} seconds"
+                )
     pretokenize_end_time = time.time()
-    print(f"Finished preprocessing {chunk_id} chunks, total time cost: {pretokenize_end_time - pretokenize_start_time:.2f} seconds")
+    print(
+        f"Finished preprocessing {chunk_count} chunks, total time cost: {pretokenize_end_time - pretokenize_start_time:.2f} seconds"
+    )
     # 迭代合并字节对
     with tqdm(total=vocab_size - len(vocab), desc="BPE merging") as pbar:
         while len(vocab) < vocab_size:
