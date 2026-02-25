@@ -2,6 +2,7 @@
 ## A1 构建 Transformer LM 模型
 - `assignment1-basics/cs336_basics/bpe/bpe_trainer.py`: 并行分词器训练脚本；
 - `assignment1-basics/cs336_basics/bpe/streaming_bpe_trainer.py`: 流式分词器训练脚本；
+- `assignment1-basics/cs336_basics/bpe/profile_bpe_trainer.py`: cProfile脚本；
 - `assignment1-basics/text_compression_ratio.py`: 压缩率测试脚本；
 - `assignment1-basics/text2int.py`: 字符数据集转id数据集的脚本；
 - `assignment1-basics/train.py`: LM训练脚本；
@@ -16,6 +17,8 @@
 - [x] 词表保存磁盘格式兼容huggingface格式；
 - [ ] 使用C++/Rust等高性能语言实现高耗时部分；
 - [x] 解决openweb大规模数据集在有限内存训练的问题（流式预分词）；
+- [x] 修复流式预分词的并行化问题
+- [x] 修复多线程cProfile的pickle问题
 
 ### Transformer语言模型架构
 - [x] 实现线性层和嵌入层；
