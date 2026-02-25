@@ -5,8 +5,141 @@ import regex as re  # 使用 regex 库，由于re对GPT-2的tokenization支持�
 import json
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+import heapq
 from tqdm import tqdm
 import time
+
+
+class _RevPair:
+    """用于 heapq 的 pair 排序包装器（频次相同取字典序更大的 pair）。"""
+
+    __slots__ = ("pair",)
+
+    def __init__(self, pair: tuple[bytes, bytes]):
+        self.pair = pair
+
+    def __lt__(self, other: "_RevPair") -> bool:  # type: ignore[override]
+        return self.pair > other.pair
+
+
+def _pair_counts(byte_seq: tuple[bytes, ...]) -> dict[tuple[bytes, bytes], int]:
+    counts: dict[tuple[bytes, bytes], int] = defaultdict(int)
+    for a, b in zip(byte_seq, byte_seq[1:]):
+        counts[(a, b)] += 1
+    return counts
+
+
+def _merge_pair_in_seq(
+    byte_seq: tuple[bytes, ...], pair: tuple[bytes, bytes], new_token: bytes
+) -> tuple[bytes, ...]:
+    if len(byte_seq) < 2:
+        return byte_seq
+    merged: list[bytes] = []
+    i = 0
+    a, b = pair
+    while i < len(byte_seq):
+        if i < len(byte_seq) - 1 and byte_seq[i] == a and byte_seq[i + 1] == b:
+            merged.append(new_token)
+            i += 2
+        else:
+            merged.append(byte_seq[i])
+            i += 1
+    return tuple(merged)
+
+
+def _bpe_merge_cached(
+    pre_token2freq: dict[tuple[bytes, ...], int],
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+    vocab_size: int,
+    pbar: tqdm | None = None,
+) -> None:
+    """缓存 + 增量更新版 BPE merge，可选 tqdm 进度条。"""
+
+    pair_freq: dict[tuple[bytes, bytes], int] = defaultdict(int)
+    pair2seqs: dict[tuple[bytes, bytes], set[tuple[bytes, ...]]] = defaultdict(set)
+
+    for byte_seq, freq in pre_token2freq.items():
+        if len(byte_seq) < 2:
+            continue
+        for a, b in zip(byte_seq, byte_seq[1:]):
+            pair = (a, b)
+            pair_freq[pair] += freq
+            pair2seqs[pair].add(byte_seq)
+
+    heap: list[tuple[int, _RevPair]] = [
+        (-freq, _RevPair(pair)) for pair, freq in pair_freq.items() if freq > 0
+    ]
+    heapq.heapify(heap)
+
+    def push_pair(pair: tuple[bytes, bytes]) -> None:
+        freq = pair_freq.get(pair, 0)
+        if freq > 0:
+            heapq.heappush(heap, (-freq, _RevPair(pair)))
+
+    while len(vocab) < vocab_size:
+        most_frequent_pair: tuple[bytes, bytes] | None = None
+        while heap:
+            neg_freq, rev_pair = heapq.heappop(heap)
+            pair = rev_pair.pair
+            freq = -neg_freq
+            if pair_freq.get(pair, 0) != freq:
+                continue
+            if freq <= 0:
+                continue
+            most_frequent_pair = pair
+            break
+
+        if most_frequent_pair is None:
+            if pbar is not None:
+                pbar.n = pbar.total
+                pbar.refresh()
+            break
+
+        a, b = most_frequent_pair
+        new_token = a + b
+        vocab[len(vocab)] = new_token
+        merges.append(most_frequent_pair)
+        if pbar is not None:
+            pbar.update(1)
+
+        affected_seqs = pair2seqs.get(most_frequent_pair)
+        if not affected_seqs:
+            pair_freq[most_frequent_pair] = 0
+            continue
+        affected_seqs = set(affected_seqs)
+        pair2seqs.pop(most_frequent_pair, None)
+
+        for old_seq in affected_seqs:
+            old_freq = pre_token2freq.get(old_seq)
+            if old_freq is None:
+                continue
+
+            old_counts = _pair_counts(old_seq)
+            new_seq = _merge_pair_in_seq(old_seq, most_frequent_pair, new_token)
+            if new_seq == old_seq:
+                continue
+            new_counts = _pair_counts(new_seq)
+
+            del pre_token2freq[old_seq]
+            pre_token2freq[new_seq] = pre_token2freq.get(new_seq, 0) + old_freq
+
+            for pair, cnt in old_counts.items():
+                pair_freq[pair] -= old_freq * cnt
+                if pair_freq[pair] <= 0:
+                    pair_freq[pair] = 0
+                seqs = pair2seqs.get(pair)
+                if seqs is not None:
+                    seqs.discard(old_seq)
+                    if not seqs:
+                        pair2seqs.pop(pair, None)
+
+            for pair, cnt in new_counts.items():
+                pair_freq[pair] += old_freq * cnt
+                pair2seqs[pair].add(new_seq)
+
+            for pair in set(old_counts.keys()) | set(new_counts.keys()):
+                push_pair(pair)
 
 def bytes_to_unicode():
     """
@@ -220,57 +353,9 @@ def bpe_streaming(
     print(
         f"Finished preprocessing {chunk_count} chunks, total time cost: {pretokenize_end_time - pretokenize_start_time:.2f} seconds"
     )
-    # 迭代合并字节对
+    # 迭代合并字节对（缓存 + 增量更新版）
     with tqdm(total=vocab_size - len(vocab), desc="BPE merging") as pbar:
-        while len(vocab) < vocab_size:
-            # 找到最频繁的字节对
-            pair2freq: defaultdict[tuple[bytes, bytes], int] = defaultdict(int)
-            for byte_seq, freq in pre_token2freq.items():  # 计算字节对频率
-                for i in range(len(byte_seq) - 1):
-                    pair2freq[byte_seq[i], byte_seq[i + 1]] += freq
-            if not pair2freq:  # 没有更多的字节对可合并
-                pbar.n = pbar.total
-                pbar.refresh()
-                break
-            most_frequent_pair = max(pair2freq.items(), key=lambda x: (x[1], x[0]))[
-                0
-            ]  # 频率最高的字节对，且字典序最小
-            # 创建新词汇项
-            new_token = most_frequent_pair[0] + most_frequent_pair[1]
-            vocab[len(vocab)] = new_token
-            # 更新预分词频率
-            to_update: dict[tuple[bytes, ...], int] = {}
-            for byte_seq, freq in pre_token2freq.items():  # 检查序列是否包含目标字节对
-                has_target_pair = False
-                for i in range(len(byte_seq) - 1):
-                    if (byte_seq[i], byte_seq[i + 1]) == most_frequent_pair:
-                        has_target_pair = True
-                        break
-
-                if has_target_pair:  # 记录需要更新的序列
-                    to_update[byte_seq] = freq
-
-            # 只更新包含目标字节对的序列
-            for byte_seq, freq in to_update.items():
-                del pre_token2freq[byte_seq]  # 从原字典中移除旧序列
-
-                new_byte_seq: list[bytes] = []
-                i = 0
-                while i < len(byte_seq):
-                    if (
-                        i < len(byte_seq) - 1
-                        and (byte_seq[i], byte_seq[i + 1]) == most_frequent_pair
-                    ):
-                        new_byte_seq.append(new_token)
-                        i += 2
-                    else:
-                        new_byte_seq.append(byte_seq[i])
-                        i += 1
-
-                pre_token2freq[tuple(new_byte_seq)] += freq  # 将合并后的序列添加回字典
-            # 记录合并规则
-            merges.append(most_frequent_pair)
-            pbar.update(1)
+        _bpe_merge_cached(pre_token2freq, vocab, merges, vocab_size, pbar=pbar)
 
     return vocab, merges
 
@@ -307,10 +392,10 @@ def save_vocab_and_merges(output_dir, vocab, merges):
 
 if __name__ == "__main__":
     vocab, merges = bpe_streaming(
-        input_path="../data/owt_train.txt",
-        vocab_size=36000,
+        input_path="../../data/TinyStoriesV2-GPT4-train.txt",
+        vocab_size=10000,
         special_tokens=["<|endoftext|>"],
-        chunk_size_mb=1024,
+        chunk_size_mb=64,
     )
 
-    save_vocab_and_merges(output_dir="../data/owt", vocab=vocab, merges=merges)
+    # save_vocab_and_merges(output_dir="../data/owt", vocab=vocab, merges=merges)
