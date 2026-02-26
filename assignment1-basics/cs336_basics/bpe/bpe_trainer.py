@@ -49,7 +49,7 @@ def _merge_pair_in_seq(
     return tuple(merged)
 
 
-def _bpe_merge_cached(
+def _bpe_merge_cached_py(
     pre_token2freq: dict[tuple[bytes, ...], int],
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
@@ -154,6 +154,44 @@ def _bpe_merge_cached(
             # 将受影响的 pair 重新推入 heap（允许过期，pop 时校验）
             for pair in set(old_counts.keys()) | set(new_counts.keys()):
                 push_pair(pair)
+
+
+def _bpe_merge_cached(
+    pre_token2freq: dict[tuple[bytes, ...], int],
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+    vocab_size: int,
+) -> None:
+    """BPE merge 主入口。
+
+    - 如果本地已安装 Rust 扩展，则优先走 Rust 加速实现
+    - 否则自动回退到纯 Python `_bpe_merge_cached_py`
+    """
+
+    # 可选 Rust 加速：见 cs336_basics/bpe/RUST_ACCEL.md
+    rust_result = None
+    try:
+        try:
+            from .rust_accel import bpe_merge_cached_rust
+        except Exception:
+            # 允许以脚本方式运行：`python bpe_trainer.py`
+            from rust_accel import bpe_merge_cached_rust  # type: ignore
+
+        rust_result = bpe_merge_cached_rust(pre_token2freq, vocab, vocab_size)
+    except Exception:
+        rust_result = None
+
+    if rust_result is not None:
+        print("[cs336_basics.bpe] merge backend: rust", flush=True)
+        vocab_out, merges_out = rust_result
+        vocab.clear()
+        vocab.update(vocab_out)
+        merges.clear()
+        merges.extend(merges_out)
+        return
+
+    print("[cs336_basics.bpe] merge backend: python", flush=True)
+    _bpe_merge_cached_py(pre_token2freq, vocab, merges, vocab_size)
 
 
 def bytes_to_unicode():
