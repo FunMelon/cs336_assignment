@@ -1,0 +1,415 @@
+# 分布式训练脚本（多GPU支持）
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import tqdm
+import time
+import os
+import csv
+import matplotlib.pyplot as plt
+import pandas as pd
+from cs336_basics import (
+    Transformer,
+    AdamW,
+    get_batch,
+    cross_entropy_loss,
+    cosine_anneal_schedule,
+    gradient_clipping,
+)
+
+# 训练循环超参数
+output_path = "./out"
+train_dataset_path = "../../cs336_data/id/owt-t-id/owt_train.bin"
+valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
+base_iteration = 15000  # 单卡基准迭代次数
+batch_size = 128  # 每个GPU的batch size
+# 分布式训练时按 GPU 数量缩放迭代次数，保持总样本量不变
+iteration = base_iteration // max(1, torch.cuda.device_count())
+saving_interval = 10000
+valid_frequency = 500
+valid_batch_multiples = 5
+accumulation_steps = 1
+# 模型超参数
+vocab_size = 32000
+context_length = 512
+d_model = 512
+nhead = 16
+num_layers = 4
+d_ff = 1344
+rope_theta = 10000.0
+dtype = torch.float32
+# 余弦退火学习率参数
+max_lr = 2e-3
+min_lr = 2e-6
+warmup_ratio = 0.05
+cosine_anneal_steps = 120000
+# 梯度裁剪参数
+max_grad_norm = 1.0
+# 优化器参数
+lr = 1e-3
+betas = (0.9, 0.95)
+eps = 1e-8
+weight_decay = 1e-2
+
+# 分布式训练参数
+world_size = torch.cuda.device_count()  # 可用的GPU数量
+dist_url = "env://"  # 使用环境变量初始化
+
+
+def setup_distributed(rank, world_size):
+    """设置分布式训练环境"""
+    # 设置CUDA设备
+    torch.cuda.set_device(rank)
+    
+    # 初始化进程组
+    dist.init_process_group(
+        backend="nccl",  # 使用NCCL后端进行GPU通信
+        init_method=dist_url,
+        world_size=world_size,
+        rank=rank
+    )
+    
+    # 设置随机种子以确保不同进程使用不同的数据
+    torch.manual_seed(42 + rank)
+    
+
+def cleanup_distributed():
+    """清理分布式训练环境"""
+    dist.destroy_process_group()
+
+
+def evaluate_validation_loss(
+    model: torch.nn.Module,
+    dataset: np.memmap,
+    batch_size: int,
+    context_length: int,
+    device: str,
+    num_batches: int = 5,
+) -> float:
+    """评估验证集上的平均损失"""
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for _ in range(num_batches):
+            input_batch, target_batch = get_batch(
+                dataset,
+                batch_size=batch_size,
+                context_length=context_length,
+                device=device,
+            )
+            input_batch = input_batch.to(
+                dtype=torch.int
+            )  # 转换为整型，以匹配嵌入层要求
+            target_batch = target_batch.to(dtype=torch.int)
+
+            logits = model(input_batch)
+            val_loss = cross_entropy_loss(logits, target_batch)
+            losses.append(val_loss.item())
+    model.train()
+    return sum(losses) / len(losses)
+
+
+def save_log(
+    log_path: str,
+    step: int,
+    wallclock_time: float,
+    train_loss: float,
+    val_loss: float | None,
+    lr: float,
+    rank: int,
+) -> None:
+    """保存日志到CSV文件（只在rank 0进程保存）"""
+    if rank != 0:
+        return
+        
+    with open(log_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                step,
+                wallclock_time,
+                train_loss,
+                val_loss,
+                lr,
+            ]
+        )
+
+
+def plot_logs(log_path: str, output_dir: str, rank: int) -> None:
+    """绘制训练和验证损失曲线（只在rank 0进程执行）"""
+    if rank != 0:
+        return
+        
+    df = pd.read_csv(log_path)
+    plt.plot(df["step"], df["train_loss"], label="Train Loss")
+    plt.plot(df["step"], df["val_loss"], label="Validation Loss")
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss over Iterations")
+    plt.legend()
+    plt.grid()
+    plt.savefig(os.path.join(output_dir, "loss_curve.png"))
+    plt.close()
+
+
+def train_worker(rank, world_size):
+    """每个训练进程的入口函数"""
+    # 设置分布式环境
+    setup_distributed(rank, world_size)
+    
+    # 创建本地设备
+    device = f"cuda:{rank}"
+    
+    # 创建模型
+    model = Transformer(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
+        d_ff=d_ff,
+        device=device,
+    )
+    
+    # 使用DistributedDataParallel包装模型
+    model = torch.nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[rank],
+        output_device=rank
+    )
+    
+    # 创建优化器
+    opt = AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+    
+    # 创建输出目录（只在rank 0进程）
+    if rank == 0:
+        os.makedirs(output_path, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        out_dir = os.path.join(output_path, f"{timestamp}")
+        os.makedirs(out_dir, exist_ok=True)
+        checkpoint_path = os.path.join(out_dir, "checkpoint.pth")
+        
+        # 创建日志文件，写入表头
+        log_path = os.path.join(out_dir, "log.csv")
+        with open(log_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["step", "wallclock_time", "train_loss", "val_loss", "lr"])
+    else:
+        out_dir = ""
+        checkpoint_path = ""
+        log_path = ""
+    
+    # 同步输出目录路径给所有进程（固定大小256字节）
+    out_dir_tensor = torch.zeros(256, dtype=torch.uint8, device=device)
+    if rank == 0:
+        # 将out_dir编码为固定长度tensor
+        out_dir_bytes = [ord(c) for c in out_dir[:255]]  # 最多255个字符
+        out_dir_tensor[:len(out_dir_bytes)] = torch.tensor(out_dir_bytes, dtype=torch.uint8, device=device)
+    
+    dist.broadcast(out_dir_tensor, src=0)
+    
+    if rank != 0:
+        out_dir_chars = out_dir_tensor.cpu().tolist()
+        out_dir = ''.join(chr(c) for c in out_dir_chars if c != 0)
+        checkpoint_path = os.path.join(out_dir, "checkpoint.pth")
+        log_path = os.path.join(out_dir, "log.csv")
+    
+    # 加载checkpoint（如果存在）
+    start_iteration = 0
+    checkpoint_exists = False
+    
+    # 首先检查 checkpoint 是否存在（只在 rank 0 检查并广播结果）
+    if rank == 0:
+        checkpoint_exists = os.path.exists(checkpoint_path)
+    
+    # 广播 checkpoint 是否存在的信息给所有进程
+    checkpoint_exists_tensor = torch.tensor([1 if checkpoint_exists else 0], dtype=torch.int, device=device)
+    dist.broadcast(checkpoint_exists_tensor, src=0)
+    checkpoint_exists = checkpoint_exists_tensor.item() == 1
+    
+    if checkpoint_exists:
+        # 只在rank 0进程加载checkpoint，然后广播给其他进程
+        if rank == 0:
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            model.module.load_state_dict(checkpoint["model_state_dict"])
+            opt.load_state_dict(checkpoint["optimizer_state_dict"])
+            start_iteration = checkpoint["iteration"]
+            print(f"Rank {rank}: Loaded checkpoint from iteration {start_iteration}")
+        
+        # 将checkpoint信息广播给所有进程
+        start_iteration_tensor = torch.tensor([start_iteration], dtype=torch.long, device=device)
+        dist.broadcast(start_iteration_tensor, src=0)
+        start_iteration = start_iteration_tensor.item()
+        
+        # 同步模型状态给所有进程
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+    else:
+        if rank == 0:
+            print("No checkpoint found, starting from scratch.")
+    
+    # 加载数据集（所有进程都加载完整数据集）
+    train_dataset = np.memmap(
+        train_dataset_path,
+        dtype=np.uint16,
+        mode="r",
+    )
+    valid_dataset = np.memmap(
+        valid_dataset_path,
+        dtype=np.uint16,
+        mode="r",
+    )
+    
+    # 将模型移动到指定设备和数据类型
+    model.to(device=device, dtype=dtype)
+    opt.to(device=device, dtype=dtype)
+    
+    # 同步所有进程（确保所有进程都准备好了）
+    dist.barrier()
+    
+    # 训练循环
+    model.train()  # 设置模型为训练模式
+    opt.zero_grad()  # 清空优化器梯度
+    
+    if rank == 0:
+        print(f"Rank {rank}: Starting distributed training on {world_size} GPUs")
+        print(f"Rank {rank}: Model: {model.module}")
+        print(f"Rank {rank}: Using device: {device}")
+        print(f"Rank {rank}: Model parameters: {model.module.compute_params()}")
+        print(f"Rank {rank}: Output directory: {out_dir}")
+        pbar = tqdm.tqdm(total=iteration, initial=start_iteration)
+    
+    start_time = time.time()
+    for iter in range(start_iteration, iteration):
+        # 每个进程处理不同的数据批次（通过rank进行数据分割）
+        # 注意：这里简化了数据分割，实际应用可以使用DistributedSampler
+        input_batch, target_batch = get_batch(
+            train_dataset,
+            batch_size=batch_size,
+            context_length=context_length,
+            device=device,
+        )
+        input_batch = input_batch.to(
+            dtype=torch.int
+        )  # 转换为整型，以匹配嵌入层要求
+        target_batch = target_batch.to(dtype=torch.int)
+        
+        current_lr = cosine_anneal_schedule(  # 计算当前学习率
+            current_step=iter,
+            warmup_steps=int(warmup_ratio * cosine_anneal_steps),
+            cosine_anneal_steps=cosine_anneal_steps,
+            max_lr=max_lr,
+            min_lr=min_lr,
+        )
+        
+        for param_group in opt.param_groups:  # 更新优化器中的学习率
+            param_group["lr"] = current_lr
+        
+        logits = model(input_batch)  # 前向传播（自动处理分布式）
+        loss = cross_entropy_loss(logits, target_batch) # 计算损失
+        loss_scaled = loss / accumulation_steps
+        loss_scaled.backward()  # 反向传播
+        
+        if (iter + 1) % accumulation_steps == 0:
+            gradient_clipping(model.parameters(), max_norm=max_grad_norm)  # 梯度裁剪
+            opt.step()  # 优化器更新参数（自动处理分布式梯度聚合）
+            opt.zero_grad()  # 清空梯度
+        
+        # 只在rank 0进程显示进度和保存日志
+        if rank == 0:
+            if iter % 10 == 0:  # 每10次迭代更新一次进度条，显示损失和学习率
+                pbar.set_description(
+                    f"Iter {iter}, Loss: {loss.item():.4f}, LR: {current_lr:.6f}"
+                )
+            
+            if (
+                iter == 0 or (iter + 1) % valid_frequency == 0 or iter == iteration - 1
+            ):  # 分别在第一次迭代、每valid_frequency次迭代和最后一次迭代时评估验证损失，记录日志和保存损失曲线图
+                # 使用rank 0进程进行验证（避免重复验证）
+                val_loss = evaluate_validation_loss(
+                    model.module,
+                    valid_dataset,
+                    batch_size,
+                    context_length,
+                    device,
+                    valid_batch_multiples,
+                )
+                
+                # 记录日志
+                save_log(
+                    log_path,
+                    step=iter + 1,
+                    wallclock_time=time.time() - start_time,
+                    train_loss=loss.item(),
+                    val_loss=val_loss,
+                    lr=current_lr,
+                    rank=rank,
+                )
+                
+                # 保存损失曲线图
+                plot_logs(log_path, out_dir, rank)
+            
+            if (
+                iter + 1
+            ) % saving_interval == 0 or iter == iteration - 1:  # 保存checkpoint
+                # 只在rank 0进程保存checkpoint
+                torch.save(
+                    {
+                        "model_state_dict": model.module.state_dict(),  # 保存原始模型状态
+                        "optimizer_state_dict": opt.state_dict(),
+                        "iteration": iter,
+                    },
+                    checkpoint_path,
+                )
+            
+            pbar.update(1)
+    
+    if rank == 0:
+        pbar.close()
+    
+    # 清理分布式环境
+    cleanup_distributed()
+
+
+def main():
+    """主函数：启动分布式训练
+    
+    支持两种启动方式：
+    1. torchrun 方式（推荐）: torchrun --nproc_per_node=N train_distributed.py
+       - 通过环境变量 RANK, LOCAL_RANK, WORLD_SIZE 获取进程信息
+    2. 直接运行方式: python train_distributed.py
+       - 使用 mp.spawn() 启动多进程
+    """
+    # 检查是否由 torchrun 启动（环境变量 RANK 存在）
+    if "RANK" in os.environ:
+        # torchrun 方式：直接从环境变量获取 rank 和 world_size
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        ws = int(os.environ["WORLD_SIZE"])
+        
+        if rank == 0:
+            print(f"检测到 {ws} 个GPU，启动分布式训练（torchrun 方式）...")
+        
+        # 直接调用 train_worker，使用 local_rank 作为 GPU 索引
+        train_worker(local_rank, ws)
+    else:
+        # 直接运行方式：使用 mp.spawn
+        if world_size < 2:
+            print("警告：检测到少于2个GPU，建议使用单GPU训练脚本")
+            print("如果想要多GPU训练，请确保至少有2个可用GPU")
+            return
+        
+        print(f"检测到 {world_size} 个GPU，启动分布式训练（mp.spawn 方式）...")
+        
+        # 使用spawn方式启动多进程训练
+        mp.spawn(
+            train_worker,
+            args=(world_size,),
+            nprocs=world_size,
+            join=True
+        )
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,9 @@
 - `assignment1-basics/cs336_basics/bpe/profile_bpe_trainer.py`: cProfile脚本；
 - `assignment1-basics/text_compression_ratio.py`: 压缩率测试脚本；
 - `assignment1-basics/text2int.py`: 字符数据集转id数据集的脚本；
-- `assignment1-basics/train.py`: LM训练脚本；
+- `assignment1-basics/train.py`: LM训练脚本（单卡）；
+- `assignment1-basics/train_distributed.py`: LM分布式训练脚本（多卡DDP）；
+- `assignment1-basics/run_distributed.sh`: 分布式训练启动脚本；
 - `assignment1-basics/plot_loss.py`: 绘图脚本；
 - `assignment1-basics/inference.py`: 推理对话脚本；
 - `assignment1-basics/LR_range_test.py`: 学习率查找脚本；
@@ -44,12 +46,19 @@
 - [x] 实现AdamW优化器；
 - [x] 实现带预热的余弦学习率调度；
 - [x] 实现梯度剪裁；
-- [ ] 手动实现backward函数；
 
 ### 训练循环
 - [x] 实现数据加载器；
 - [x] 实现checkpointing的保存和加载；
 - [x] 实现完整的训练脚本；
+
+### 分布式训练 (DDP，大多数内容由vibe-coding实现) 
+- [x] 实现基于 PyTorch DDP 的多卡数据并行训练；
+- [x] 支持 torchrun 和 mp.spawn 两种启动方式；
+- [x] 实现分布式检查点的保存和加载（rank 0 保存，广播同步）；
+- [x] 实现跨进程的路径信息同步（固定长度 tensor 广播）；
+- [x] 按 GPU 数量自动缩放迭代次数，保持总样本量不变；
+- [x] 配置 NCCL 环境变量，支持单机多卡通信；
 
 ### 生成文本
 - [x] 搭建 generate text 过程；
