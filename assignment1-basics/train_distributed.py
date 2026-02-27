@@ -26,14 +26,14 @@ from cs336_basics import (
 output_path = "./out"
 train_dataset_path = "../../cs336_data/id/owt-t-id/owt_train.bin"
 valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
-base_iteration = 30000  # 单卡基准迭代次数
-batch_size = 128  # 每个GPU的batch size
+base_iteration = 60000  # 单卡基准迭代次数
+batch_size = 96  # 每个GPU的batch size（减半以节省显存）
 # 分布式训练时按 GPU 数量缩放迭代次数，保持总样本量不变
 iteration = base_iteration // max(1, torch.cuda.device_count())
 saving_interval = 10000
 valid_frequency = 500
 valid_batch_multiples = 5
-accumulation_steps = 1
+accumulation_steps = 2  # 梯度累积步数（增加以补偿batch_size减半）
 # 模型超参数
 vocab_size = 32000
 context_length = 512
@@ -43,6 +43,7 @@ num_layers = 4
 d_ff = 1344
 rope_theta = 10000.0
 logit_cap = 30.0  # Logit Softcapping 阈值，防止logits爆炸
+z_loss_alpha = 1e-4  # Z-loss 正则化系数
 dtype = torch.float32
 # 余弦退火学习率参数
 max_lr = 2e-2
@@ -126,6 +127,8 @@ def save_log(
     step: int,
     wallclock_time: float,
     train_loss: float,
+    ce_loss: float,
+    z_loss: float,
     val_loss: float | None,
     lr: float,
     rank: int,
@@ -141,6 +144,8 @@ def save_log(
                 step,
                 wallclock_time,
                 train_loss,
+                ce_loss,
+                z_loss,
                 val_loss,
                 lr,
             ]
@@ -153,13 +158,45 @@ def plot_logs(log_path: str, output_dir: str, rank: int) -> None:
         return
         
     df = pd.read_csv(log_path)
-    plt.plot(df["step"], df["train_loss"], label="Train Loss")
-    plt.plot(df["step"], df["val_loss"], label="Validation Loss")
-    plt.xlabel("Iteration")
-    plt.ylabel("Loss")
-    plt.title("Training and Validation Loss over Iterations")
-    plt.legend()
-    plt.grid()
+    
+    # 图1: 总体损失曲线（train_loss + val_loss）
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 左上: 总损失曲线
+    axes[0, 0].plot(df["step"], df["train_loss"], label="Train Loss (Total)", color='blue')
+    axes[0, 0].plot(df["step"], df["val_loss"], label="Validation Loss", color='orange')
+    axes[0, 0].set_xlabel("Iteration")
+    axes[0, 0].set_ylabel("Loss")
+    axes[0, 0].set_title("Total Training and Validation Loss")
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
+    
+    # 右上: CE Loss vs Z-Loss 分项对比
+    axes[0, 1].plot(df["step"], df["ce_loss"], label="CE Loss", color='green')
+    axes[0, 1].plot(df["step"], df["z_loss"], label="Z-Loss", color='red')
+    axes[0, 1].set_xlabel("Iteration")
+    axes[0, 1].set_ylabel("Loss")
+    axes[0, 1].set_title("CE Loss vs Z-Loss Components")
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
+    
+    # 左下: Z-Loss 单独放大（通常数值较小）
+    axes[1, 0].plot(df["step"], df["z_loss"], label="Z-Loss", color='red')
+    axes[1, 0].set_xlabel("Iteration")
+    axes[1, 0].set_ylabel("Z-Loss")
+    axes[1, 0].set_title("Z-Loss Over Training")
+    axes[1, 0].legend()
+    axes[1, 0].grid(True)
+    
+    # 右下: 学习率变化
+    axes[1, 1].plot(df["step"], df["lr"], label="Learning Rate", color='purple')
+    axes[1, 1].set_xlabel("Iteration")
+    axes[1, 1].set_ylabel("Learning Rate")
+    axes[1, 1].set_title("Learning Rate Schedule")
+    axes[1, 1].legend()
+    axes[1, 1].grid(True)
+    
+    plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "loss_curve.png"))
     plt.close()
 
@@ -231,7 +268,7 @@ def train_worker(rank, world_size):
         log_path = os.path.join(out_dir, "log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["step", "wallclock_time", "train_loss", "val_loss", "lr"])
+            writer.writerow(["step", "wallclock_time", "train_loss", "ce_loss", "z_loss", "val_loss", "lr"])
     else:
         out_dir = ""
         checkpoint_path = ""
@@ -352,8 +389,10 @@ def train_worker(rank, world_size):
             param_group["lr"] = current_lr * adamw_lr_ratio
         
         logits = model(input_batch)  # 前向传播（自动处理分布式）
-        loss = cross_entropy_loss(logits, target_batch) # 计算损失
-        loss_scaled = loss / accumulation_steps
+        ce_loss = cross_entropy_loss(logits, target_batch) # 计算交叉熵损失
+        z_loss = model.module.compute_z_loss(logits, alpha=z_loss_alpha) # 计算z-loss
+        total_loss = ce_loss + z_loss
+        loss_scaled = total_loss / accumulation_steps
         loss_scaled.backward()  # 反向传播
         
         if (iter + 1) % accumulation_steps == 0:
@@ -367,7 +406,7 @@ def train_worker(rank, world_size):
         if rank == 0:
             if iter % 10 == 0:  # 每10次迭代更新一次进度条，显示损失和学习率
                 pbar.set_description(
-                    f"Iter {iter}, Loss: {loss.item():.4f}, LR: {current_lr:.6f}"
+                    f"Iter {iter}, Loss: {total_loss.item():.4f}, LR: {current_lr:.6f}"
                 )
             
             if (
@@ -388,7 +427,9 @@ def train_worker(rank, world_size):
                     log_path,
                     step=iter + 1,
                     wallclock_time=time.time() - start_time,
-                    train_loss=loss.item(),
+                    train_loss=total_loss.item(),  # 记录包含z-loss的总损失
+                    ce_loss=ce_loss.item(),        # 记录交叉熵损失
+                    z_loss=z_loss.item(),          # 记录z-loss
                     val_loss=val_loss,
                     lr=current_lr,
                     rank=rank,

@@ -71,3 +71,4 @@
 - [x] 实现Muon优化器和AdamW优化器混合（3.75 -> 3.73）；
 - [x] 增加QK-Norm正则化项（3.73 -> 3.69）；
 - [x] 增加logit softcapping功能；
+- [x] 增加z-loss正则化项（当前会导致显存占用激增：compute_z_loss 函数是独立于标准交叉熵损失运行的。将同一个 logits 张量同时传给了这两个函数，计算图在这里发生了分叉（Branching））；

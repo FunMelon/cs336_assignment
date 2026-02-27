@@ -79,6 +79,17 @@ class Transformer(torch.nn.Module):
             logits = self.logit_cap * torch.tanh(logits / self.logit_cap)
         return logits
 
+    def compute_z_loss(self, logits: torch.Tensor, alpha: float = 1e-4) -> torch.Tensor:
+        """计算Z-loss正则项
+        args:
+            logits: 模型输出logits
+            alpha: 正则化强度系数
+        returns:
+            z_loss: 正则项损失值
+        """
+        logsumexp = torch.logsumexp(logits, dim=-1)
+        return alpha * (logsumexp ** 2).mean()
+
     def generate_text(self, prompts: str, temperature: float = 1.0, top_p: float = 1.0, max_length: int | None = None) -> str:
         """生成文本。
         args:
