@@ -1,10 +1,8 @@
 # 自实现的torch.nn.Module模块
 import torch
+import torch.nn.functional as F
 from math import sqrt
-from .util import (
-    SiLU,
-    scaled_dot_product_attention,
-)
+from .util import SiLU
 
 
 class Linear(torch.nn.Module):
@@ -327,14 +325,10 @@ class MultiheadSelfAttention(torch.nn.Module):
                 K, token_positions
             )  # (batch_size, num_heads, seq_len, d_k)
 
-        # 创建下三角掩码以防止未来信息泄露
-        mask = torch.tril(
-            torch.ones(seq_len, seq_len, device=x.device)
-        ).bool()  # (seq_len, seq_len)，上三角为False，下三角为True
-
-        # 计算缩放点积注意力
-        attn_output = scaled_dot_product_attention(
-            Q, K, V, mask
+        # 使用 PyTorch 内置的 scaled_dot_product_attention
+        # is_causal=True 自动应用因果掩码，兼容 torch.compile 和 FlashAttention
+        attn_output = F.scaled_dot_product_attention(
+            Q, K, V, is_causal=True
         )  # (batch_size, num_heads, seq_len, d_k)
 
         # 拼接多个头的输出

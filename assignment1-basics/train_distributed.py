@@ -179,6 +179,13 @@ def train_worker(rank, world_size):
         output_device=rank
     )
     
+    # 使用 torch.compile 优化模型
+    # mode="reduce-overhead" 适合小batch、频繁调用场景
+    # mode="max-autotune" 会花更多编译时间但运行更快
+    model = torch.compile(model, mode="default")
+    if rank == 0:
+        print("torch.compile enabled")
+    
     # 创建优化器
     opt = AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
     
