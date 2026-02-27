@@ -286,6 +286,10 @@ class MultiheadSelfAttention(torch.nn.Module):
 
         self.rope = rope
 
+        # QK-Norm: 对每个 head 的 Q 和 K 进行 RMSNorm 归一化
+        self.q_norm = RMSNorm(self.d_k, device=device, dtype=dtype)
+        self.k_norm = RMSNorm(self.d_k, device=device, dtype=dtype)
+
     def forward(
         self, x: torch.Tensor, token_positions: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -311,6 +315,10 @@ class MultiheadSelfAttention(torch.nn.Module):
         V = V.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(
             1, 2
         )  # (batch_size, num_heads, seq_len, d_k)
+
+        # 应用 QK-Norm（在 RoPE 之前对 Q 和 K 归一化）
+        Q = self.q_norm(Q)  # (batch_size, num_heads, seq_len, d_k)
+        K = self.k_norm(K)  # (batch_size, num_heads, seq_len, d_k)
 
         if token_positions is not None:
             assert (
