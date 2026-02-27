@@ -1,6 +1,9 @@
 # 分布式训练脚本（多GPU支持）
 import numpy as np
 import torch
+# 设置 float32 矩阵乘法精度（A100/H100 等 Ampere+ 架构）
+# 注意：此选项只影响矩阵乘法的计算精度，不影响数据存储类型
+torch.set_float32_matmul_precision('high')
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import tqdm
