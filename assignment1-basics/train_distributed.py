@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from cs336_basics import (
     Transformer,
+    Muon,
     AdamW,
     get_batch,
     cross_entropy_loss,
@@ -50,10 +51,16 @@ cosine_anneal_steps = 120000
 # 梯度裁剪参数
 max_grad_norm = 1.0
 # 优化器参数
-lr = 1e-3
-betas = (0.9, 0.95)
-eps = 1e-8
-weight_decay = 1e-2
+# Muon 参数 (用于 2D 权重矩阵)
+muon_lr = 0.02  # Muon 推荐的学习率
+muon_momentum = 0.95  # Muon 动量系数
+muon_weight_decay = 0.0  # Muon 通常不需要权重衰减
+ns_steps = 5  # Newton-Schulz 迭代次数
+# AdamW 参数 (用于 1D 参数、Embedding 等)
+adamw_lr = 1e-3
+adamw_betas = (0.9, 0.95)
+adamw_eps = 1e-8
+adamw_weight_decay = 1e-2
 
 # 分布式训练参数
 world_size = torch.cuda.device_count()  # 可用的GPU数量
@@ -189,8 +196,26 @@ def train_worker(rank, world_size):
     if rank == 0:
         print("torch.compile enabled")
     
-    # 创建优化器
-    opt = AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+    # 分离参数：2D 权重矩阵用 Muon，其他参数（1D bias、norm 层、embedding）用 AdamW
+    muon_params = []  # 2D 权重矩阵
+    adamw_params = []  # 1D 参数、embedding 等
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.ndim == 2 and 'embedding' not in name.lower():
+                # 2D 权重矩阵（排除 embedding）
+                muon_params.append(param)
+            else:
+                # 1D 参数（bias, norm 层参数）和 embedding
+                adamw_params.append(param)
+    
+    if rank == 0:
+        print(f"Muon params: {len(muon_params)} tensors")
+        print(f"AdamW params: {len(adamw_params)} tensors")
+    
+    # 创建混合优化器
+    muon_opt = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=muon_weight_decay, ns_steps=ns_steps)
+    adamw_opt = AdamW(adamw_params, lr=adamw_lr, betas=adamw_betas, eps=adamw_eps, weight_decay=adamw_weight_decay)
     
     # 创建输出目录（只在rank 0进程）
     if rank == 0:
@@ -243,7 +268,8 @@ def train_worker(rank, world_size):
         if rank == 0:
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.module.load_state_dict(checkpoint["model_state_dict"])
-            opt.load_state_dict(checkpoint["optimizer_state_dict"])
+            muon_opt.load_state_dict(checkpoint["muon_optimizer_state_dict"])
+            adamw_opt.load_state_dict(checkpoint["adamw_optimizer_state_dict"])
             start_iteration = checkpoint["iteration"]
             print(f"Rank {rank}: Loaded checkpoint from iteration {start_iteration}")
         
@@ -273,14 +299,16 @@ def train_worker(rank, world_size):
     
     # 将模型移动到指定设备和数据类型
     model.to(device=device, dtype=dtype)
-    opt.to(device=device, dtype=dtype)
+    muon_opt.to(device=device, dtype=dtype)
+    adamw_opt.to(device=device, dtype=dtype)
     
     # 同步所有进程（确保所有进程都准备好了）
     dist.barrier()
     
     # 训练循环
     model.train()  # 设置模型为训练模式
-    opt.zero_grad()  # 清空优化器梯度
+    muon_opt.zero_grad()  # 清空优化器梯度
+    adamw_opt.zero_grad()
     
     if rank == 0:
         print(f"Rank {rank}: Starting distributed training on {world_size} GPUs")
@@ -313,8 +341,13 @@ def train_worker(rank, world_size):
             min_lr=min_lr,
         )
         
-        for param_group in opt.param_groups:  # 更新优化器中的学习率
-            param_group["lr"] = current_lr
+        # 更新优化器中的学习率（按比例调整）
+        muon_lr_ratio = muon_lr / max_lr
+        adamw_lr_ratio = adamw_lr / max_lr
+        for param_group in muon_opt.param_groups:
+            param_group["lr"] = current_lr * muon_lr_ratio
+        for param_group in adamw_opt.param_groups:
+            param_group["lr"] = current_lr * adamw_lr_ratio
         
         logits = model(input_batch)  # 前向传播（自动处理分布式）
         loss = cross_entropy_loss(logits, target_batch) # 计算损失
@@ -323,8 +356,10 @@ def train_worker(rank, world_size):
         
         if (iter + 1) % accumulation_steps == 0:
             gradient_clipping(model.parameters(), max_norm=max_grad_norm)  # 梯度裁剪
-            opt.step()  # 优化器更新参数（自动处理分布式梯度聚合）
-            opt.zero_grad()  # 清空梯度
+            muon_opt.step()  # Muon 更新 2D 权重矩阵
+            adamw_opt.step()  # AdamW 更新其他参数
+            muon_opt.zero_grad()
+            adamw_opt.zero_grad()
         
         # 只在rank 0进程显示进度和保存日志
         if rank == 0:
@@ -367,7 +402,8 @@ def train_worker(rank, world_size):
                 torch.save(
                     {
                         "model_state_dict": model.module.state_dict(),  # 保存原始模型状态
-                        "optimizer_state_dict": opt.state_dict(),
+                        "muon_optimizer_state_dict": muon_opt.state_dict(),
+                        "adamw_optimizer_state_dict": adamw_opt.state_dict(),
                         "iteration": iter,
                     },
                     checkpoint_path,

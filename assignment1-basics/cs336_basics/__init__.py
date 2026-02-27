@@ -18,7 +18,7 @@ try:
         save_checkpoint,
         load_checkpoint,
     )
-    from .optimizer import AdamW
+    from .optimizer import AdamW, Muon
     from .module import (
         Linear,
         Embedding,
@@ -48,6 +48,7 @@ try:
         "Transformer",
         "cross_entropy_loss",
         "AdamW",
+        "Muon",
         "cosine_anneal_schedule",
         "gradient_clipping",
         "get_batch",
