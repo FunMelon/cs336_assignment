@@ -36,7 +36,7 @@ def scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    mask: torch.Tensor | None = None,
+    attn_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     计算缩放点积注意力。
@@ -44,7 +44,8 @@ def scaled_dot_product_attention(
         query (torch.Tensor): 查询张量，形状为 (..., seq_len_q, d_k)。
         key (torch.Tensor): 键张量，形状为 (..., seq_len_k, d_k)。
         value (torch.Tensor): 值张量，形状为 (..., seq_len_v, d_v)。
-        mask (torch.Tensor | None): 可选的掩码张量，形状为 (..., seq_len_q, seq_len_k)。
+        attn_mask (torch.Tensor | None): 可选的加法掩码张量，形状为 (..., seq_len_q, seq_len_k)。
+            被遮蔽位置应为 -inf，其他位置为 0。
     returns:
         torch.Tensor: 注意力输出张量，形状为 (..., seq_len_q, d_v)。
     """
@@ -53,8 +54,8 @@ def scaled_dot_product_attention(
         torch.tensor(d_k, dtype=query.dtype, device=query.device)
     )
 
-    if mask is not None:
-        scores = scores.masked_fill(mask == False, float("-inf"))  # 使用掩码
+    if attn_mask is not None:
+        scores = scores + attn_mask  # 加法掩码，-inf 位置 softmax 后为 0
 
     attn_weights = softmax(scores, dim=-1)
     output = torch.matmul(attn_weights, value)
