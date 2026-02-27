@@ -42,6 +42,7 @@ nhead = 16
 num_layers = 4
 d_ff = 1344
 rope_theta = 10000.0
+logit_cap = 30.0  # Logit Softcapping 阈值，防止logits爆炸
 dtype = torch.float32
 # 余弦退火学习率参数
 max_lr = 2e-2
@@ -179,6 +180,7 @@ def train_worker(rank, world_size):
         nhead=nhead,
         num_layers=num_layers,
         d_ff=d_ff,
+        logit_cap=logit_cap,
         device=device,
     )
     
