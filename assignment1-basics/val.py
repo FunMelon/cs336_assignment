@@ -6,7 +6,7 @@ from cs336_basics import Transformer, cross_entropy_loss, get_batch
 
 # 路径配置
 checkpoint_path = "./out/owt/checkpoint.pth" 
-valid_dataset_path = "./data/id/owt-v-id/owt_valid.bin"
+valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
 
 # 模型超参数
 vocab_size = 32000
@@ -17,7 +17,7 @@ num_layers = 4
 d_ff = 1344
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
-batch_size = 32
+batch_size = 256
 
 
 valid_dataset = np.memmap(valid_dataset_path, dtype=np.uint16, mode="r")

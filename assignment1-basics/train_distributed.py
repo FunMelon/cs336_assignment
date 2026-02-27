@@ -22,7 +22,7 @@ from cs336_basics import (
 output_path = "./out"
 train_dataset_path = "../../cs336_data/id/owt-t-id/owt_train.bin"
 valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
-base_iteration = 15000  # 单卡基准迭代次数
+base_iteration = 30000  # 单卡基准迭代次数
 batch_size = 128  # 每个GPU的batch size
 # 分布式训练时按 GPU 数量缩放迭代次数，保持总样本量不变
 iteration = base_iteration // max(1, torch.cuda.device_count())
@@ -40,8 +40,8 @@ d_ff = 1344
 rope_theta = 10000.0
 dtype = torch.float32
 # 余弦退火学习率参数
-max_lr = 2e-3
-min_lr = 2e-6
+max_lr = 2e-2
+min_lr = 2e-5
 warmup_ratio = 0.05
 cosine_anneal_steps = 120000
 # 梯度裁剪参数
