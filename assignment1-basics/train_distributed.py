@@ -1,5 +1,6 @@
 # 分布式训练脚本（多GPU支持）
 import numpy as np
+from contextlib import nullcontext
 import torch
 # 设置 float32 矩阵乘法精度（A100/H100 等 Ampere+ 架构）
 # 注意：此选项只影响矩阵乘法的计算精度，不影响数据存储类型
@@ -45,21 +46,20 @@ d_ff = 2048
 rope_theta = 10000.0
 logit_cap = 30.0  # Logit Softcapping 阈值，防止logits爆炸
 dtype = torch.float32
-# 余弦退火学习率参数
-max_lr = 4e-2
-min_lr = 2e-5
-warmup_ratio = 0.08
+# 学习率调度参数
+warmup_ratio = 0.05           # 预热阶段占总步数的比例
+lr_decay_ratio = 0.1          # 学习率从峰值衰减到最小值的比例 (min_lr = peak_lr * ratio)
 cosine_anneal_steps = iteration
 # 梯度裁剪参数
 max_grad_norm = 1.0
 # 优化器参数
 # Muon 参数 (用于 2D 权重矩阵)
-muon_lr = 0.02  # Muon 推荐的学习率
-muon_momentum = 0.95  # Muon 动量系数
-muon_weight_decay = 0.0  # Muon 通常不需要权重衰减
-ns_steps = 5  # Newton-Schulz 迭代次数
+muon_lr = 0.02                # Muon 优化器的峰值学习率
+muon_momentum = 0.95          # Muon 动量系数
+muon_weight_decay = 0.0       # Muon 通常不需要权重衰减
+ns_steps = 5                  # Newton-Schulz 迭代次数
 # AdamW 参数 (用于 1D 参数、Embedding 等)
-adamw_lr = 1e-3
+adamw_lr = 1e-3               # AdamW 优化器的峰值学习率
 adamw_betas = (0.9, 0.95)
 adamw_eps = 1e-8
 adamw_weight_decay = 1e-2
@@ -352,28 +352,33 @@ def train_worker(rank, world_size):
         )  # 转换为整型，以匹配嵌入层要求
         target_batch = target_batch.to(dtype=torch.int)
         
-        current_lr = cosine_anneal_schedule(  # 计算当前学习率
+        # 计算学习率调度因子 (范围: [lr_decay_ratio, 1.0])
+        # 使用归一化参数，让 cosine_anneal_schedule 返回一个比例因子
+        lr_factor = cosine_anneal_schedule(
             current_step=iter,
             warmup_steps=int(warmup_ratio * cosine_anneal_steps),
             cosine_anneal_steps=cosine_anneal_steps,
-            max_lr=max_lr,
-            min_lr=min_lr,
+            max_lr=1.0,              # 归一化最大值
+            min_lr=lr_decay_ratio,   # 衰减到峰值的 lr_decay_ratio 倍
         )
         
-        # 更新优化器中的学习率（按比例调整）
-        muon_lr_ratio = muon_lr / max_lr
-        adamw_lr_ratio = adamw_lr / max_lr
+        # 更新各优化器的学习率：峰值学习率 × 调度因子
         for param_group in muon_opt.param_groups:
-            param_group["lr"] = current_lr * muon_lr_ratio
+            param_group["lr"] = muon_lr * lr_factor
         for param_group in adamw_opt.param_groups:
-            param_group["lr"] = current_lr * adamw_lr_ratio
+            param_group["lr"] = adamw_lr * lr_factor
         
-        logits = model(input_batch)  # 前向传播（自动处理分布式）
-        loss = cross_entropy_loss(logits, target_batch) # 计算损失
-        loss_scaled = loss / accumulation_steps
-        loss_scaled.backward()  # 反向传播
+        # 梯度累积优化：只在需要更新参数时同步梯度，避免中间步骤的无效通信
+        is_sync_step = (iter + 1) % accumulation_steps == 0
+        sync_context = nullcontext() if is_sync_step else model.no_sync()
         
-        if (iter + 1) % accumulation_steps == 0:
+        with sync_context:
+            logits = model(input_batch)  # 前向传播（自动处理分布式）
+            loss = cross_entropy_loss(logits, target_batch) # 计算损失
+            loss_scaled = loss / accumulation_steps
+            loss_scaled.backward()  # 反向传播（非同步步骤不触发AllReduce）
+        
+        if is_sync_step:
             gradient_clipping(model.parameters(), max_norm=max_grad_norm)  # 梯度裁剪
             muon_opt.step()  # Muon 更新 2D 权重矩阵
             adamw_opt.step()  # AdamW 更新其他参数
@@ -384,7 +389,7 @@ def train_worker(rank, world_size):
         if rank == 0:
             if iter % 10 == 0:  # 每10次迭代更新一次进度条，显示损失和学习率
                 pbar.set_description(
-                    f"Iter {iter}, Loss: {loss.item():.4f}, LR: {current_lr:.6f}"
+                    f"Iter {iter}, Loss: {loss.item():.4f}, LR factor: {lr_factor:.4f}"
                 )
             
             if (
@@ -421,7 +426,7 @@ def train_worker(rank, world_size):
                     wallclock_time=time.time() - start_time,
                     train_loss=loss.item(),
                     val_loss=val_loss,
-                    lr=current_lr,
+                    lr=lr_factor,  # 记录调度因子，实际 lr = peak_lr * lr_factor
                     rank=rank,
                 )
                 
