@@ -72,3 +72,4 @@
 - [x] 增加QK-Norm正则化项（3.73 → 3.69）；
 - [x] 增加logit softcapping功能；
 - [x] 扩大了模型参数（45.2M → 134M，3.10）；
+- [x] 增加了early stopping功能；
