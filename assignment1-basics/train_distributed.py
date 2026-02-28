@@ -30,7 +30,7 @@ base_iteration = 200000  # 单卡基准迭代次数
 batch_size = 16  # 每个GPU的batch size
 # 分布式训练时按 GPU 数量缩放迭代次数，保持总样本量不变
 iteration = base_iteration // max(1, torch.cuda.device_count())
-saving_interval = 10000
+saving_interval = -1
 valid_frequency = 1000
 valid_batch_multiples = 5
 accumulation_steps = 4
@@ -408,9 +408,11 @@ def train_worker(rank, world_size):
                 # 保存损失曲线图
                 plot_logs(log_path, out_dir, rank)
             
-            if (
-                iter + 1
-            ) % saving_interval == 0 or iter == iteration - 1:  # 保存checkpoint
+            # 保存checkpoint（saving_interval为-1时不保存checkpoint）
+            should_save_checkpoint = saving_interval > 0 and (
+                (iter + 1) % saving_interval == 0 or iter == iteration - 1
+            )
+            if should_save_checkpoint:
                 # 只在rank 0进程保存checkpoint
                 torch.save(
                     {
@@ -421,6 +423,12 @@ def train_worker(rank, world_size):
                     },
                     checkpoint_path,
                 )
+            
+            # 最后一次迭代时，单独保存模型文件（不含优化器状态）
+            if iter == iteration - 1:
+                model_only_path = os.path.join(out_dir, "model.pth")
+                torch.save(model.module.state_dict(), model_only_path)
+                print(f"Model saved to {model_only_path}")
             
             pbar.update(1)
     
