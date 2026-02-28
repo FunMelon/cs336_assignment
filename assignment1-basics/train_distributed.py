@@ -26,29 +26,29 @@ from cs336_basics import (
 output_path = "./out"
 train_dataset_path = "../../cs336_data/id/owt-t-id/owt_train.bin"
 valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
-base_iteration = 30000  # 单卡基准迭代次数
-batch_size = 128  # 每个GPU的batch size
+base_iteration = 200000  # 单卡基准迭代次数
+batch_size = 16  # 每个GPU的batch size
 # 分布式训练时按 GPU 数量缩放迭代次数，保持总样本量不变
 iteration = base_iteration // max(1, torch.cuda.device_count())
 saving_interval = 10000
-valid_frequency = 500
+valid_frequency = 1000
 valid_batch_multiples = 5
-accumulation_steps = 1
+accumulation_steps = 4
 # 模型超参数
 vocab_size = 32000
-context_length = 512
-d_model = 512
-nhead = 16
-num_layers = 4
-d_ff = 1344
+context_length = 1024
+d_model = 768
+nhead = 12
+num_layers = 12
+d_ff = 2048
 rope_theta = 10000.0
 logit_cap = 30.0  # Logit Softcapping 阈值，防止logits爆炸
 dtype = torch.float32
 # 余弦退火学习率参数
-max_lr = 2e-2
+max_lr = 4e-2
 min_lr = 2e-5
-warmup_ratio = 0.05
-cosine_anneal_steps = 120000
+warmup_ratio = 0.08
+cosine_anneal_steps = iteration
 # 梯度裁剪参数
 max_grad_norm = 1.0
 # 优化器参数
@@ -198,26 +198,37 @@ def train_worker(rank, world_size):
     if rank == 0:
         print("torch.compile enabled")
     
-    # 分离参数：2D 权重矩阵用 Muon，其他参数（1D bias、norm 层、embedding）用 AdamW
+    # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
+    # 关键：Norm 层的仿射参数不应施加 Weight Decay，否则会破坏网络等变性映射
     muon_params = []  # 2D 权重矩阵
-    adamw_params = []  # 1D 参数、embedding 等
+    adamw_decay_params = []  # 需要 weight decay 的参数（如 embedding）
+    adamw_nodecay_params = []  # 不需要 weight decay 的参数（bias、norm 层参数）
     
     for name, param in model.named_parameters():
         if param.requires_grad:
             if param.ndim == 2 and 'embedding' not in name.lower():
-                # 2D 权重矩阵（排除 embedding）
+                # 2D 权重矩阵（排除 embedding）用 Muon
                 muon_params.append(param)
+            elif 'embedding' in name.lower():
+                # Embedding 参数需要 weight decay
+                adamw_decay_params.append(param)
             else:
-                # 1D 参数（bias, norm 层参数）和 embedding
-                adamw_params.append(param)
+                # 1D 参数（bias）和 norm 层参数不需要 weight decay
+                # 这包括 LayerNorm/RMSNorm 的 weight(gamma) 和 bias(beta)
+                adamw_nodecay_params.append(param)
     
     if rank == 0:
         print(f"Muon params: {len(muon_params)} tensors")
-        print(f"AdamW params: {len(adamw_params)} tensors")
+        print(f"AdamW params (with decay): {len(adamw_decay_params)} tensors")
+        print(f"AdamW params (no decay): {len(adamw_nodecay_params)} tensors")
     
     # 创建混合优化器
     muon_opt = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=muon_weight_decay, ns_steps=ns_steps)
-    adamw_opt = AdamW(adamw_params, lr=adamw_lr, betas=adamw_betas, eps=adamw_eps, weight_decay=adamw_weight_decay)
+    # AdamW 使用参数组：embedding 有 weight decay，其他 1D 参数（bias、norm）无 weight decay
+    adamw_opt = AdamW([
+        {'params': adamw_decay_params, 'weight_decay': adamw_weight_decay},
+        {'params': adamw_nodecay_params, 'weight_decay': 0.0}
+    ], lr=adamw_lr, betas=adamw_betas, eps=adamw_eps)
     
     # 创建输出目录（只在rank 0进程）
     if rank == 0:

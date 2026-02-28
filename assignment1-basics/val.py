@@ -10,14 +10,15 @@ valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
 
 # 模型超参数
 vocab_size = 32000
-context_length = 512
-d_model = 512
-nhead = 16
-num_layers = 4
-d_ff = 1344
+context_length = 1024
+d_model = 768
+nhead = 12
+num_layers = 12
+d_ff = 2048
+logit_cap = 30.0
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
-batch_size = 256
+batch_size = 64
 
 
 valid_dataset = np.memmap(valid_dataset_path, dtype=np.uint16, mode="r")
@@ -28,6 +29,7 @@ model = Transformer(
     nhead=nhead,
     num_layers=num_layers,
     d_ff=d_ff,
+    logit_cap=logit_cap,
     device=device,
 )
 checkpoint = torch.load(checkpoint_path, map_location=device)
