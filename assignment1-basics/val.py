@@ -15,7 +15,6 @@ d_model = 768
 nhead = 12
 num_layers = 12
 d_ff = 2048
-logit_cap = 30.0
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32
 batch_size = 64
@@ -29,7 +28,6 @@ model = Transformer(
     nhead=nhead,
     num_layers=num_layers,
     d_ff=d_ff,
-    logit_cap=logit_cap,
     device=device,
 )
 model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))

@@ -44,7 +44,6 @@ nhead = 12
 num_layers = 12
 d_ff = 2048
 rope_theta = 10000.0
-logit_cap = 30.0  # Logit Softcapping 阈值，防止logits爆炸
 dtype = torch.float32
 # 学习率调度参数
 warmup_ratio = 0.05           # 预热阶段占总步数的比例
@@ -181,7 +180,6 @@ def train_worker(rank, world_size):
         nhead=nhead,
         num_layers=num_layers,
         d_ff=d_ff,
-        logit_cap=logit_cap,
         device=device,
     )
     
