@@ -31,10 +31,10 @@ batch_size = 16  # 每个GPU的batch size
 iteration = 100000 
 saving_interval = -1
 valid_frequency = 1000
-valid_batch_multiples = 5
+valid_batch_multiples = 8
 accumulation_steps = 4
 # Early Stopping 超参数
-early_stopping_patience = 5  # 连续 N 次验证无改善则停止
+early_stopping_patience = 15  # 连续 N 次验证无改善则停止
 early_stopping_min_delta = 0.01  # 最小改善阈值
 # 模型超参数
 vocab_size = 32000
