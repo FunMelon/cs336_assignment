@@ -5,7 +5,7 @@ import torch
 from cs336_basics import Transformer, cross_entropy_loss, get_batch
 
 # 路径配置
-checkpoint_path = "./out/owt/checkpoint.pth" 
+checkpoint_path = "./out/owt/best_model.pth" 
 valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
 
 # 模型超参数
@@ -32,8 +32,7 @@ model = Transformer(
     logit_cap=logit_cap,
     device=device,
 )
-checkpoint = torch.load(checkpoint_path, map_location=device)
-model.load_state_dict(checkpoint["model_state_dict"])
+model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
 model.to(device=device, dtype=dtype)
 model.eval()
 
