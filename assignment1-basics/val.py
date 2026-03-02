@@ -31,6 +31,7 @@ model = Transformer(
     d_ff=d_ff,
     logit_cap=logit_cap,
     device=device,
+    tie_weights=False,
 )
 model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
 model.to(device=device, dtype=dtype)

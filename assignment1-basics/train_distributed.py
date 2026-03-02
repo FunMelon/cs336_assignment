@@ -183,6 +183,7 @@ def train_worker(rank, world_size):
         d_ff=d_ff,
         logit_cap=logit_cap,
         device=device,
+        tie_weights=False,
     )
     
     # 使用DistributedDataParallel包装模型
