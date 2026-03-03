@@ -15,6 +15,8 @@ class Transformer(torch.nn.Module):
         num_layers: int,
         d_ff: int,
         rope_theta: float = 10000.0,
+        logit_cap: float = 0.0,
+        tie_weights: bool = False,
         tokenizer: Tokenizer | None = None,
         device=None,
         dtype=None,
@@ -38,6 +40,8 @@ class Transformer(torch.nn.Module):
         self.nhead = nhead
         self.num_layers = num_layers
         self.d_ff = d_ff
+        self.logit_cap = logit_cap
+        self.tie_weights = tie_weights
         self.tokenizer = tokenizer
         self.device = device == None and torch.device("cpu") or device
         self.dtype = dtype == None and torch.float32 or dtype
@@ -59,6 +63,8 @@ class Transformer(torch.nn.Module):
         )
         self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
         self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+        if self.tie_weights:
+            self.lm_head.weight = self.embedding.weight
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """前向传播函数。
@@ -72,6 +78,9 @@ class Transformer(torch.nn.Module):
             x = block(x)  # 形状保持不变
         x = self.ln_final(x)  # 形状为 (batch_size, sequence_length, d_model)
         logits = self.lm_head(x)  # 形状为 (batch_size, sequence_length, vocab_size)
+        # Logit Softcapping: 防止logits爆炸，稳定训练
+        if self.logit_cap > 0:
+            logits = self.logit_cap * torch.tanh(logits / self.logit_cap)
         return logits
 
     def generate_text(self, prompts: str, temperature: float = 1.0, top_p: float = 1.0, max_length: int | None = None) -> str:
@@ -148,7 +157,10 @@ class Transformer(torch.nn.Module):
             int: 模型的总参数数量。
         """
         total_params = 0
-        total_params += 2 * self.vocab_size * self.d_model  # Embedding 和 lm_head
+        if self.tie_weights:
+            total_params += self.vocab_size * self.d_model  # Embedding（与 lm_head 共享权重）
+        else:
+            total_params += 2 * self.vocab_size * self.d_model  # Embedding 和 lm_head
         total_params += self.num_layers * (
             4 * self.d_model * self.d_model  # Q, K, V, O 矩阵
             + 3 * self.d_model * self.d_ff  # 前馈网络的权重

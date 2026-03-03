@@ -1,10 +1,7 @@
 # 自实现的torch.nn.Module模块
 import torch
 from math import sqrt
-from .util import (
-    SiLU,
-    scaled_dot_product_attention,
-)
+from .util import SiLU, scaled_dot_product_attention
 
 
 class Linear(torch.nn.Module):
@@ -289,6 +286,10 @@ class MultiheadSelfAttention(torch.nn.Module):
 
         self.rope = rope
 
+        # QK-Norm: 对每个 head 的 Q 和 K 进行 RMSNorm 归一化
+        self.q_norm = RMSNorm(self.d_k, device=device, dtype=dtype)
+        self.k_norm = RMSNorm(self.d_k, device=device, dtype=dtype)
+
     def forward(
         self, x: torch.Tensor, token_positions: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -315,6 +316,10 @@ class MultiheadSelfAttention(torch.nn.Module):
             1, 2
         )  # (batch_size, num_heads, seq_len, d_k)
 
+        # 应用 QK-Norm（在 RoPE 之前对 Q 和 K 归一化）
+        Q = self.q_norm(Q)  # (batch_size, num_heads, seq_len, d_k)
+        K = self.k_norm(K)  # (batch_size, num_heads, seq_len, d_k)
+
         if token_positions is not None:
             assert (
                 self.rope is not None
@@ -327,14 +332,16 @@ class MultiheadSelfAttention(torch.nn.Module):
                 K, token_positions
             )  # (batch_size, num_heads, seq_len, d_k)
 
-        # 创建下三角掩码以防止未来信息泄露
-        mask = torch.tril(
-            torch.ones(seq_len, seq_len, device=x.device)
-        ).bool()  # (seq_len, seq_len)，上三角为False，下三角为True
+        # 创建因果掩码（上三角为 -inf，下三角和对角线为 0）
+        # 使用加法掩码而非 bool 掩码，兼容 torch.compile
+        causal_mask = torch.triu(
+            torch.full((seq_len, seq_len), float("-inf"), device=x.device, dtype=x.dtype),
+            diagonal=1
+        )  # (seq_len, seq_len)
 
-        # 计算缩放点积注意力
+        # 计算缩放点积注意力（使用自定义实现）
         attn_output = scaled_dot_product_attention(
-            Q, K, V, mask
+            Q, K, V, attn_mask=causal_mask
         )  # (batch_size, num_heads, seq_len, d_k)
 
         # 拼接多个头的输出

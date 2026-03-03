@@ -19,14 +19,14 @@ from cs336_basics import (
 # 训练循环超参数
 output_path = "./out"
 checkpoint_path = ""
-train_dataset_path = "./data/id/owt-t-id/owt_train.bin"
-valid_dataset_path = "./data/id/owt-v-id/owt_valid.bin"
-iteration = 120000
-batch_size = 16
+train_dataset_path = "../../cs336_data/id/owt-t-id/owt_train.bin"
+valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
+iteration = 15000
+batch_size = 128
 saving_interval = 10000
 valid_frequency = 500
 valid_batch_multiples = 5
-accumulation_steps = 8
+accumulation_steps = 1
 # 模型超参数
 vocab_size = 32000
 context_length = 512
