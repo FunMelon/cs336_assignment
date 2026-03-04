@@ -19,6 +19,7 @@ benchmark_steps = 10        # 基准测试步数
 enable_memory_profiling = False  # 是否启用内存分析
 enable_autocast = False     # 是否启用混合精度训练
 autocast_dtype = torch.bfloat16  # 混合精度数据类型
+enable_compile = False      # 是否启用torch.compile编译优化
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32       # 数据类型
 
@@ -167,6 +168,7 @@ def run_benchmark(
     enable_memory_profiling_: bool = enable_memory_profiling,
     enable_autocast_: bool = enable_autocast,
     autocast_dtype_: torch.dtype = autocast_dtype,
+    enable_compile_: bool = enable_compile,
     device_: str = device,
     dtype_: torch.dtype = dtype,
 ) -> dict:
@@ -193,6 +195,7 @@ def run_benchmark(
     print(f"  - enable_autocast: {enable_autocast_}")
     if enable_autocast_:
         print(f"  - autocast_dtype: {autocast_dtype_}")
+    print(f"  - enable_compile: {enable_compile_}")
     print("=" * 60)
     
     # 创建模型
@@ -206,6 +209,11 @@ def run_benchmark(
         device_=device_,
         dtype_=dtype_,
     )
+    
+    # 应用torch.compile编译优化
+    if enable_compile_:
+        print("正在编译模型 (torch.compile)...")
+        model = torch.compile(model)
     
     # 打印模型参数量
     num_params = model.compute_params()
@@ -280,6 +288,7 @@ def parse_args():
     parser.add_argument("--enable_autocast", action="store_true", help="启用混合精度训练(autocast)")
     parser.add_argument("--autocast_dtype", type=str, default="bfloat16",
                        choices=["float16", "bfloat16"], help="混合精度数据类型")
+    parser.add_argument("--enable_compile", action="store_true", help="启用torch.compile编译优化")
     
     # 设备参数
     parser.add_argument("--device", type=str, default=device, help="设备 (cuda/cpu)")
@@ -322,6 +331,7 @@ if __name__ == "__main__":
         enable_memory_profiling_=args.enable_memory_profiling,
         enable_autocast_=args.enable_autocast,
         autocast_dtype_=autocast_dtype_,
+        enable_compile_=args.enable_compile,
         device_=args.device,
         dtype_=dtype_,
     )

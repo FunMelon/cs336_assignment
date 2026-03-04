@@ -24,6 +24,7 @@ warmup_steps = 10                       # 预热步数
 benchmark_steps = 100                   # 基准测试步数（前向/反向各100次）
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32                   # 数据类型
+enable_compile = False                  # 是否启用torch.compile编译优化
 
 
 def generate_qkv(
@@ -49,14 +50,17 @@ def benchmark_attention_forward(
     V: torch.Tensor,
     warmup_steps_: int,
     benchmark_steps_: int,
+    attention_fn=None,
 ) -> float:
     """基准测试注意力前向传播"""
     device_type = Q.device.type
+    if attention_fn is None:
+        attention_fn = scaled_dot_product_attention
     
     # 预热步骤
     with torch.no_grad():
         for _ in range(warmup_steps_):
-            _ = scaled_dot_product_attention(Q, K, V)
+            _ = attention_fn(Q, K, V)
             if device_type == "cuda":
                 torch.cuda.synchronize()
     
@@ -65,7 +69,7 @@ def benchmark_attention_forward(
     with torch.no_grad():
         for _ in range(benchmark_steps_):
             start = timeit.default_timer()
-            _ = scaled_dot_product_attention(Q, K, V)
+            _ = attention_fn(Q, K, V)
             if device_type == "cuda":
                 torch.cuda.synchronize()
             end = timeit.default_timer()
@@ -81,12 +85,15 @@ def benchmark_attention_backward(
     V: torch.Tensor,
     warmup_steps_: int,
     benchmark_steps_: int,
+    attention_fn=None,
 ) -> tuple[float, float]:
     """
     基准测试注意力反向传播
     返回: (反向传播平均时间, 反向传播前内存使用MB)
     """
     device_type = Q.device.type
+    if attention_fn is None:
+        attention_fn = scaled_dot_product_attention
     
     # 预热步骤
     for _ in range(warmup_steps_):
@@ -95,7 +102,7 @@ def benchmark_attention_backward(
         K_ = K.detach().clone().requires_grad_(True)
         V_ = V.detach().clone().requires_grad_(True)
         
-        output = scaled_dot_product_attention(Q_, K_, V_)
+        output = attention_fn(Q_, K_, V_)
         loss = output.sum()
         loss.backward()
         if device_type == "cuda":
@@ -117,7 +124,7 @@ def benchmark_attention_backward(
         V_ = V.detach().clone().requires_grad_(True)
         
         # 前向传播
-        output = scaled_dot_product_attention(Q_, K_, V_)
+        output = attention_fn(Q_, K_, V_)
         loss = output.sum()
         
         if device_type == "cuda":
@@ -150,18 +157,25 @@ def run_single_benchmark(
     benchmark_steps_: int,
     device_: str,
     dtype_: torch.dtype,
+    enable_compile_: bool = enable_compile,
 ) -> dict:
     """运行单个配置的基准测试"""
     
     # 生成Q, K, V
     Q, K, V = generate_qkv(batch_size_, seq_len_, d_model_, device_, dtype_)
     
+    # 准备注意力函数（是否编译）
+    if enable_compile_:
+        attention_fn = torch.compile(scaled_dot_product_attention)
+    else:
+        attention_fn = scaled_dot_product_attention
+    
     # 前向传播基准测试
-    forward_time = benchmark_attention_forward(Q, K, V, warmup_steps_, benchmark_steps_)
+    forward_time = benchmark_attention_forward(Q, K, V, warmup_steps_, benchmark_steps_, attention_fn)
     
     # 反向传播基准测试
     backward_time, memory_before_backward = benchmark_attention_backward(
-        Q, K, V, warmup_steps_, benchmark_steps_
+        Q, K, V, warmup_steps_, benchmark_steps_, attention_fn
     )
     
     # 清理GPU内存
@@ -188,6 +202,7 @@ def run_benchmark(
     device_: str = device,
     dtype_: torch.dtype = dtype,
     output_format: str = "both",
+    enable_compile_: bool = enable_compile,
 ) -> pd.DataFrame:
     """运行完整的基准测试"""
     
@@ -203,6 +218,7 @@ def run_benchmark(
     print(f"  - warmup_steps: {warmup_steps_}")
     print(f"  - benchmark_steps: {benchmark_steps_}")
     print(f"  - 多头注意力: 禁用 (头数=1)")
+    print(f"  - enable_compile: {enable_compile_}")
     print("=" * 70)
     
     results = []
@@ -223,6 +239,7 @@ def run_benchmark(
                 benchmark_steps_=benchmark_steps_,
                 device_=device_,
                 dtype_=dtype_,
+                enable_compile_=enable_compile_,
             )
             results.append(result)
             
@@ -297,6 +314,8 @@ def parse_args():
                        help="输出格式 (默认: both)")
     parser.add_argument("--save_csv", type=str, default=None,
                        help="保存结果到CSV文件")
+    parser.add_argument("--enable_compile", action="store_true",
+                       help="启用torch.compile编译优化")
     
     return parser.parse_args()
 
@@ -322,6 +341,7 @@ if __name__ == "__main__":
         device_=args.device,
         dtype_=dtype_,
         output_format=args.output_format,
+        enable_compile_=args.enable_compile,
     )
     
     # 保存结果到CSV
