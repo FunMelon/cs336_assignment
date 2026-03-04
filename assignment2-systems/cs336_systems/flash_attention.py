@@ -6,6 +6,7 @@ import triton.language as tl
 # 导入 PyTorch 版本中编译好的反向传播函数（Triton 版本也复用它）
 from .flash_attention_pytorch import _compiled_flash_backward
 
+torch.set_float32_matmul_precision('high')
 
 # =============================================================================
 # Triton 内核：FlashAttention-2 前向传播

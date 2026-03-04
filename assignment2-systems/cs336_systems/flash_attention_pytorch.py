@@ -1,6 +1,7 @@
 import torch
 import math
 
+torch.set_float32_matmul_precision('high')
 
 # =============================================================================
 # 反向传播的纯 PyTorch 实现（将被 torch.compile 编译优化）
