@@ -92,6 +92,8 @@
 
 ## A2 底层算子优化
 - `assignment2-systems/cs336_systems/benchmarking_script.py`: 基准测试脚本；
+- `assignment2-systems/cs336_systems/pytorch_attention`: 测试原生注意力机制的脚本；
+
 
 ### 性能分析与基准测试
 - [x] 编写端到端前向/反向传播基准测试脚本；
