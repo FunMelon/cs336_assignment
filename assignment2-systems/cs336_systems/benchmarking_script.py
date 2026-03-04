@@ -16,6 +16,9 @@ num_heads = 32              # 注意力头数量
 batch_size = 8              # 批大小
 warmup_steps = 5            # 预热步数
 benchmark_steps = 10        # 基准测试步数
+enable_memory_profiling = False  # 是否启用内存分析
+enable_autocast = False     # 是否启用混合精度训练
+autocast_dtype = torch.bfloat16  # 混合精度数据类型
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float32       # 数据类型
 
@@ -64,15 +67,22 @@ def benchmark_forward(
     input_data: torch.Tensor,
     warmup_steps_: int,
     benchmark_steps_: int,
+    enable_autocast_: bool = enable_autocast,
+    autocast_dtype_: torch.dtype = autocast_dtype,
 ) -> float:
     """基准测试前向传播"""
     model.eval()
+    device_type = input_data.device.type
     
     # 预热步骤
     with torch.no_grad():
         for _ in range(warmup_steps_):
-            _ = model(input_data)
-            if input_data.device.type == "cuda":
+            if enable_autocast_ and device_type == "cuda":
+                with torch.autocast(device_type="cuda", dtype=autocast_dtype_):
+                    _ = model(input_data)
+            else:
+                _ = model(input_data)
+            if device_type == "cuda":
                 torch.cuda.synchronize()
     
     # 基准测试
@@ -80,8 +90,12 @@ def benchmark_forward(
     with torch.no_grad():
         for _ in range(benchmark_steps_):
             start = timeit.default_timer()
-            _ = model(input_data)
-            if input_data.device.type == "cuda":
+            if enable_autocast_ and device_type == "cuda":
+                with torch.autocast(device_type="cuda", dtype=autocast_dtype_):
+                    _ = model(input_data)
+            else:
+                _ = model(input_data)
+            if device_type == "cuda":
                 torch.cuda.synchronize()
             end = timeit.default_timer()
             times.append(end - start)
@@ -95,28 +109,41 @@ def benchmark_forward_backward(
     input_data: torch.Tensor,
     warmup_steps_: int,
     benchmark_steps_: int,
+    enable_autocast_: bool = enable_autocast,
+    autocast_dtype_: torch.dtype = autocast_dtype,
 ) -> float:
     """基准测试前向和反向传播"""
     model.train()
+    device_type = input_data.device.type
     
     # 预热步骤
     for _ in range(warmup_steps_):
-        logits = model(input_data)
-        # 简单的损失计算：对logits求和
-        loss = logits.sum()
+        if enable_autocast_ and device_type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype_):
+                logits = model(input_data)
+                # 简单的损失计算：对logits求和
+                loss = logits.sum()
+        else:
+            logits = model(input_data)
+            loss = logits.sum()
         loss.backward()
         model.zero_grad()
-        if input_data.device.type == "cuda":
+        if device_type == "cuda":
             torch.cuda.synchronize()
     
     # 基准测试
     times = []
     for _ in range(benchmark_steps_):
         start = timeit.default_timer()
-        logits = model(input_data)
-        loss = logits.sum()
+        if enable_autocast_ and device_type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype_):
+                logits = model(input_data)
+                loss = logits.sum()
+        else:
+            logits = model(input_data)
+            loss = logits.sum()
         loss.backward()
-        if input_data.device.type == "cuda":
+        if device_type == "cuda":
             torch.cuda.synchronize()
         end = timeit.default_timer()
         times.append(end - start)
@@ -137,11 +164,14 @@ def run_benchmark(
     warmup_steps_: int = warmup_steps,
     benchmark_steps_: int = benchmark_steps,
     forward_only: bool = False,
+    enable_memory_profiling_: bool = enable_memory_profiling,
+    enable_autocast_: bool = enable_autocast,
+    autocast_dtype_: torch.dtype = autocast_dtype,
     device_: str = device,
     dtype_: torch.dtype = dtype,
 ) -> dict:
     """运行完整的基准测试"""
-    
+
     print("=" * 60)
     print("Transformer 基准测试")
     print("=" * 60)
@@ -159,6 +189,10 @@ def run_benchmark(
     print(f"  - warmup_steps: {warmup_steps_}")
     print(f"  - benchmark_steps: {benchmark_steps_}")
     print(f"  - forward_only: {forward_only}")
+    print(f"  - enable_memory_profiling: {enable_memory_profiling_}")
+    print(f"  - enable_autocast: {enable_autocast_}")
+    if enable_autocast_:
+        print(f"  - autocast_dtype: {autocast_dtype_}")
     print("=" * 60)
     
     # 创建模型
@@ -179,14 +213,34 @@ def run_benchmark(
     
     # 生成随机数据
     input_data = generate_random_batch(batch_size_, context_length_, vocab_size_, device_)
-    
+
+    # ==================== 内存分析：开始记录 ====================
+    if enable_memory_profiling_ and device_.startswith("cuda"):
+        print("\n[Memory Profiling] 开始记录内存历史...")
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
+    # ============================================================
+
     # 运行基准测试
     if forward_only:
-        avg_time = benchmark_forward(model, input_data, warmup_steps_, benchmark_steps_)
+        avg_time = benchmark_forward(
+            model, input_data, warmup_steps_, benchmark_steps_,
+            enable_autocast_, autocast_dtype_
+        )
         mode = "Forward Only"
     else:
-        avg_time = benchmark_forward_backward(model, input_data, warmup_steps_, benchmark_steps_)
+        avg_time = benchmark_forward_backward(
+            model, input_data, warmup_steps_, benchmark_steps_,
+            enable_autocast_, autocast_dtype_
+        )
         mode = "Forward + Backward"
+
+    # ==================== 内存分析：保存快照并停止记录 ====================
+    if enable_memory_profiling_ and device_.startswith("cuda"):
+        print("[Memory Profiling] 保存内存快照到 memory_snapshot.pickle ...")
+        torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+        print("[Memory Profiling] 停止记录内存历史...")
+        torch.cuda.memory._record_memory_history(enabled=None)
+    # ===================================================================
     
     # 计算吞吐量
     tokens_per_step = batch_size_ * context_length_
@@ -222,6 +276,10 @@ def parse_args():
     parser.add_argument("--warmup_steps", type=int, default=warmup_steps, help="预热步数")
     parser.add_argument("--benchmark_steps", type=int, default=benchmark_steps, help="基准测试步数")
     parser.add_argument("--forward_only", action="store_true", help="仅测试前向传播")
+    parser.add_argument("--enable_memory_profiling", action="store_true", help="启用内存分析并保存快照")
+    parser.add_argument("--enable_autocast", action="store_true", help="启用混合精度训练(autocast)")
+    parser.add_argument("--autocast_dtype", type=str, default="bfloat16",
+                       choices=["float16", "bfloat16"], help="混合精度数据类型")
     
     # 设备参数
     parser.add_argument("--device", type=str, default=device, help="设备 (cuda/cpu)")
@@ -242,6 +300,13 @@ if __name__ == "__main__":
     }
     dtype_ = dtype_map[args.dtype]
     
+    # 解析混合精度数据类型
+    autocast_dtype_map = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    autocast_dtype_ = autocast_dtype_map[args.autocast_dtype]
+    
     # 运行基准测试
     results = run_benchmark(
         d_model_=args.d_model,
@@ -254,6 +319,9 @@ if __name__ == "__main__":
         warmup_steps_=args.warmup_steps,
         benchmark_steps_=args.benchmark_steps,
         forward_only=args.forward_only,
+        enable_memory_profiling_=args.enable_memory_profiling,
+        enable_autocast_=args.enable_autocast,
+        autocast_dtype_=autocast_dtype_,
         device_=args.device,
         dtype_=dtype_,
     )

@@ -89,3 +89,24 @@
 | - Muon优化器混合 | 3.2109 | -0.0417 |
 | + 权重共享 | 3.2836 | -0.1144 |
 | + BF16 | 3.3523 | -0.1831 |
+
+## A2 底层算子优化
+- `assignment2-systems/cs336_systems/benchmarking_script.py`: 基准测试脚本；
+
+### 性能分析与基准测试
+- [x] 编写端到端前向/反向传播基准测试脚本；
+- [ ] 使用 Nsight Systems 分析核函数耗时和计算占比；
+- [x] 使用 `torch.cuda.memory._record_memory_history` 分析模型峰值显存占用情况；
+
+### 注意力机制优化与 FlashAttention-2
+- [ ] 使用 PyTorch 按照分块逻辑实现 FlashAttention-2 的前向传播；
+- [ ] 使用 Triton 语言编写 FlashAttention-2 的前向传播 Kernel；
+- [ ] 用 Triton 纯手写反向传播内核；
+
+### 分布式数据并行训练 (DDP)
+- [ ] 实现基础版 (Naïve) DDP 类
+- [ ] 实现改进版DDP；
+- [ ] 实现重叠版 (Overlap) DDP；
+- [ ] 实现分桶 (Bucketed) DDP；
+
+### 优化器状态分片 (ZeRO-1)
