@@ -93,6 +93,9 @@
 ## A2 底层算子优化
 - `assignment2-systems/cs336_systems/benchmarking_script.py`: 基准测试脚本；
 - `assignment2-systems/cs336_systems/pytorch_attention`: 测试原生注意力机制的脚本；
+- `assignment2-systems/cs336_systems/flash_attention_pytorch`: FlashAttention的PyTorch实现（其中的反向传播逻辑被Triton脚本服用）；
+- `assignment2-systems/cs336_systems/flash_attention`: FlashAttention的Triton实现；
+
 
 
 ### 性能分析与基准测试
@@ -104,6 +107,7 @@
 - [x] 使用 PyTorch 按照分块逻辑实现 FlashAttention-2 的前向传播；
 - [x] 使用 Triton 编写 FlashAttention-2 的前向传播 Kernel；
 - [x] 实现 FlashAttention 的因果掩码功能；
+- [x] 使用 PyTorch 实现 FlashAttention-2 反向传播（重计算策略），并通过 `torch.compile` 编译优化；
 - [ ] 用 Triton 实现反向传播内核；
 
 ### 分布式数据并行训练 (DDP)

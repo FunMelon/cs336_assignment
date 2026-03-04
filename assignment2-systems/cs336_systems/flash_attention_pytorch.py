@@ -2,6 +2,119 @@ import torch
 import math
 
 
+# =============================================================================
+# 反向传播的纯 PyTorch 实现（将被 torch.compile 编译优化）
+# =============================================================================
+# FlashAttention 反向传播的核心思想：**重计算（Recomputation）**
+#
+# 前向传播时我们没有保存巨大的 N×N 注意力矩阵 P，
+# 反向传播时利用保存的 Q, K, V, O, L 来"当场重算" P。
+# 其中 L（logsumexp）是关键：有了它就能瞬间从 S 恢复出 P，
+# 无需重新做完整的 softmax 分母求和。
+#
+# 公式 P_ij = exp(S_ij - L_i) 之所以成立，是因为：
+#   L_i = log(sum_j(exp(S_ij)))
+#   所以 exp(S_ij - L_i) = exp(S_ij) / sum_j(exp(S_ij)) = softmax(S)_ij
+# =============================================================================
+
+def _flash_backward_impl(dO, Q, K, V, O, L, is_causal):
+    """
+    FlashAttention-2 反向传播的 7 步公式实现。
+
+    参数:
+        dO:  上游梯度（即 loss 对 O 的梯度），形状 (B, N, d)
+        Q:   前向传播的 Query,  形状 (B, N, d)
+        K:   前向传播的 Key,    形状 (B, N, d)
+        V:   前向传播的 Value,  形状 (B, N, d)
+        O:   前向传播的输出,    形状 (B, N, d)
+        L:   前向传播的 logsumexp, 形状 (B, N)
+        is_causal: 是否使用因果掩码
+
+    返回:
+        dQ, dK, dV: 分别对应 Q, K, V 的梯度，形状均为 (B, N, d)
+    """
+    # 缩放因子
+    d = Q.shape[-1]
+    scale = 1.0 / math.sqrt(d)
+
+    # =========================================================================
+    # 第 0 步：计算中间向量 D = rowsum(dO ⊙ O)
+    # =========================================================================
+    # D_i = sum_j(dO_ij * O_ij)，对最后一个维度求和
+    # 这个向量在第 5 步中会用到，它巧妙地吸收了 softmax 导数中的对角项
+    # 形状: (B, N, 1)  keepdim=True 保留维度以便后续广播
+    D = (dO * O).sum(dim=-1, keepdim=True)
+
+    # =========================================================================
+    # 第 1 步：重算未归一化的注意力分数 S = Q @ K^T / sqrt(d)
+    # =========================================================================
+    # 形状: (B, N, N)  —— 这就是前向传播中没有保存的那个大矩阵
+    S = torch.bmm(Q, K.transpose(1, 2)) * scale
+
+    # 如果使用因果掩码，需要在 S 上应用同样的掩码
+    if is_causal:
+        seq_len = Q.shape[1]
+        # 构造下三角掩码：row_idx >= col_idx 的位置为 True（可见），否则为 False（遮蔽）
+        q_idx = torch.arange(seq_len, device=Q.device).unsqueeze(1)  # (N, 1)
+        k_idx = torch.arange(seq_len, device=Q.device).unsqueeze(0)  # (1, N)
+        causal_mask = k_idx > q_idx  # (N, N)，True 表示需要被屏蔽的"未来"位置
+        S = S.masked_fill(causal_mask.unsqueeze(0), -1e6)
+
+    # =========================================================================
+    # 第 2 步：利用 L 瞬间重算完整的注意力矩阵 P
+    # =========================================================================
+    # P_ij = exp(S_ij - L_i)
+    # 这就是 L 的魔力：不需要重新算 softmax 的分母，直接用 L 就能恢复 P
+    # L.unsqueeze(-1) 将 (B, N) 扩展为 (B, N, 1) 以便广播
+    P = torch.exp(S - L.unsqueeze(-1))
+
+    # =========================================================================
+    # 第 3 步：计算 V 的梯度 dV = P^T @ dO
+    # =========================================================================
+    # P^T 的形状: (B, N, N)^T = (B, N, N)
+    # dO 的形状: (B, N, d)
+    # dV 的形状: (B, N, d)
+    dV = torch.bmm(P.transpose(1, 2), dO)
+
+    # =========================================================================
+    # 第 4 步：计算 P 的梯度 dP = dO @ V^T
+    # =========================================================================
+    # dO 的形状: (B, N, d)
+    # V^T 的形状: (B, d, N)
+    # dP 的形状: (B, N, N)
+    dP = torch.bmm(dO, V.transpose(1, 2))
+
+    # =========================================================================
+    # 第 5 步：计算 S 的梯度 dS = P ⊙ (dP - D)
+    # =========================================================================
+    # 这是全场最巧妙的一步！
+    # 标准 softmax 的导数是一个复杂的雅可比矩阵运算，
+    # 但因为有了 D 向量，被化简成了简单的逐元素乘法
+    #
+    # 直觉理解：
+    # - dP - D 相当于"去中心化"的梯度（减去了加权平均）
+    # - 再乘以 P 就完成了 softmax 梯度的计算
+    dS = P * (dP - D)
+
+    # =========================================================================
+    # 第 6 步：计算 Q 和 K 的梯度
+    # =========================================================================
+    # 由于 S = Q @ K^T / sqrt(d)，根据矩阵乘法的导数规则：
+    # dQ = dS @ K / sqrt(d)
+    # dK = dS^T @ Q / sqrt(d)
+    dQ = torch.bmm(dS, K) * scale
+    dK = torch.bmm(dS.transpose(1, 2), Q) * scale
+
+    return dQ, dK, dV
+
+
+# 用 torch.compile 编译反向传播函数
+# torch.compile 是 PyTorch 2.0 引入的 JIT 编译器，
+# 它会自动把多个算子融合（fusion）成一个高效的 CUDA 内核，
+# 减少内存读写次数，显著提升性能
+_compiled_flash_backward = torch.compile(_flash_backward_impl)
+
+
 class FlashAttention(torch.autograd.Function):
     """
     使用纯 PyTorch 实现 FlashAttention-2 的前向传播。
@@ -243,8 +356,27 @@ class FlashAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dO):
-        """反向传播（尚未实现）"""
-        raise NotImplementedError("FlashAttention 反向传播尚未实现。")
+        """
+        FlashAttention-2 反向传播。
+
+        参数:
+            dO: 上游梯度（loss 对前向输出 O 的梯度），形状 (B, N, d)
+
+        返回:
+            dQ, dK, dV, None
+            其中 None 对应 forward 中的 is_causal 参数（布尔值没有梯度）
+        """
+        # 从上下文中取出前向传播保存的张量
+        L, Q, K, V, O = ctx.saved_tensors
+        is_causal = ctx.is_causal
+
+        # 调用 torch.compile 编译后的反向传播函数
+        dQ, dK, dV = _compiled_flash_backward(dO, Q, K, V, O, L, is_causal)
+
+        # 返回与 forward 参数一一对应的梯度
+        # forward(ctx, Q, K, V, is_causal) → 需要返回 (dQ, dK, dV, None)
+        # is_causal 是布尔值，没有梯度，返回 None
+        return dQ, dK, dV, None
 
 
 def flash_attention_pytorch(Q, K, V, is_causal=False):

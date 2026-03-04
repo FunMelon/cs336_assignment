@@ -3,6 +3,9 @@ import math
 import triton
 import triton.language as tl
 
+# 导入 PyTorch 版本中编译好的反向传播函数（Triton 版本也复用它）
+from .flash_attention_pytorch import _compiled_flash_backward
+
 
 # =============================================================================
 # Triton 内核：FlashAttention-2 前向传播
@@ -344,8 +347,25 @@ class FlashAttentionTriton(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dO):
-        """反向传播（尚未实现）"""
-        raise NotImplementedError("FlashAttention Triton 反向传播尚未实现。")
+        """
+        FlashAttention-2 反向传播（复用 PyTorch 编译后的反向函数）。
+
+        Triton 前向 + torch.compile 反向 是一种常见的混合策略：
+        前向用 Triton 手写内核获得最优性能，
+        反向用 torch.compile 自动融合算子，开发效率和性能兼顾。
+
+        参数:
+            dO: 上游梯度，形状 (B, N, d)
+
+        返回:
+            dQ, dK, dV, None
+        """
+        L, Q, K, V, O = ctx.saved_tensors
+        is_causal = ctx.is_causal
+
+        dQ, dK, dV = _compiled_flash_backward(dO, Q, K, V, O, L, is_causal)
+
+        return dQ, dK, dV, None
 
 
 def flash_attention_triton(Q, K, V, is_causal=False):
