@@ -55,7 +55,7 @@ class FlashAttention(torch.autograd.Function):
             Q:          查询张量 (Query),  形状 (batch_size, seq_len, d)
             K:          键张量   (Key),    形状 (batch_size, seq_len, d)
             V:          值张量   (Value),  形状 (batch_size, seq_len, d)
-            is_causal:  是否使用因果遮罩（本实现中暂不处理）
+            is_causal:  是否使用因果遮罩（True 时只允许 query 关注其之前的 key）
 
         返回:
             O:          注意力输出张量, 形状 (batch_size, seq_len, d)
@@ -144,6 +144,23 @@ class FlashAttention(torch.autograd.Function):
                 # 这是一个小矩阵（64×64），而不是完整的 N×N，这就是省内存的关键！
                 S_ij = torch.bmm(Q_i, K_j.transpose(1, 2)) * scale
 
+                # ----- 6a-causal. 应用因果掩码 -----
+                # 因果掩码的含义：位置 i 的 query 只能"看到"位置 j <= i 的 key
+                # 即"未来"的信息被屏蔽掉，这是自回归语言模型的核心约束
+                #
+                # 实现方式：构造 query 和 key 的绝对位置索引，比较它们
+                # 对于 key_pos > query_pos 的位置（即"未来"位置），
+                # 在注意力分数上加一个很大的负数 -1e6
+                # 经过 softmax 后 exp(-1e6) ≈ 0，相当于完全屏蔽了这些位置
+                if is_causal:
+                    # q_indices: 当前 Q 块中每个 query 的绝对位置 [q_start, q_start+1, ..., q_end-1]
+                    # k_indices: 当前 K 块中每个 key 的绝对位置 [kv_start, kv_start+1, ..., kv_end-1]
+                    q_indices = torch.arange(q_start, q_end, device=Q.device).unsqueeze(1)  # (Br, 1)
+                    k_indices = torch.arange(kv_start, kv_end, device=Q.device).unsqueeze(0)  # (1, Bc)
+                    # causal_mask[i,j] = True 当 key 位置 > query 位置（即"未来"，需要屏蔽）
+                    causal_mask = k_indices > q_indices  # (Br, Bc)，广播到 (B, Br, Bc)
+                    S_ij = S_ij.masked_fill(causal_mask.unsqueeze(0), -1e6)
+
                 # ----- 6b. 计算当前块的行最大值 m_ij -----
                 # 对 S_ij 的最后一个维度（Bc维度）取最大值
                 # 形状: (B, Br)，即每行 query 对当前 K 块的最大注意力分数
@@ -219,6 +236,8 @@ class FlashAttention(torch.autograd.Function):
         # FlashAttention 的一大优势：只需保存 L, Q, K, V, O 这五个张量，
         # 而不需要保存巨大的 N×N 注意力矩阵，大幅节省显存
         ctx.save_for_backward(L, Q, K, V, O)
+        # 保存因果掩码标志，反向传播时需要用同样的掩码
+        ctx.is_causal = is_causal
 
         return O
 

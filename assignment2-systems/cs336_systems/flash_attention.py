@@ -42,6 +42,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,                   # 头嵌入维度 d
     Q_TILE_SIZE: tl.constexpr,         # Q 块大小 Br（对应 PyTorch 版本的 Br）
     K_TILE_SIZE: tl.constexpr,         # K/V 块大小 Bc（对应 PyTorch 版本的 Bc）
+    is_causal: tl.constexpr,           # 是否启用因果掩码（编译时常量，True/False 会生成不同的内核）
 ):
     # =====================================================================
     # 第一步：确定当前线程块负责哪个 Q 块和哪个 batch
@@ -161,6 +162,29 @@ def flash_fwd_kernel(
         # 结果 S_ij 形状: (Q_TILE_SIZE, K_TILE_SIZE)
         S_ij = tl.dot(Q_i, tl.trans(K_j)) * scale
 
+        # ----- 5b-causal. 应用因果掩码 -----
+        # is_causal 是编译时常量（tl.constexpr），所以这个 if 在编译时就会被决定
+        # True 和 False 会各自编译出一个版本的内核，不会有运行时分支开销
+        if is_causal:
+            # 构造 query 和 key 的绝对位置索引向量
+            # q_indices: 当前 Q 块中每行 query 的全局位置
+            #   = [query_tile_index * Q_TILE_SIZE + 0, +1, ..., +Q_TILE_SIZE-1]
+            #   形状: (Q_TILE_SIZE,)
+            q_indices = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            # k_indices: 当前 K 块中每列 key 的全局位置
+            #   = [_j * K_TILE_SIZE + 0, +1, ..., +K_TILE_SIZE-1]
+            #   形状: (K_TILE_SIZE,)
+            k_indices = _j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+            # 因果掩码比较: query 位置 i 只能看到 key 位置 j <= i
+            # q_indices[:, None] 广播为 (Q_TILE_SIZE, 1)
+            # k_indices[None, :] 广播为 (1, K_TILE_SIZE)
+            # 结果 causal_mask 形状: (Q_TILE_SIZE, K_TILE_SIZE)
+            # 值为 True 的位置表示 key 在 query 的"未来"，需要被屏蔽
+            causal_mask = k_indices[None, :] > q_indices[:, None]
+            # 对被屏蔽的位置加上 -1e6（一个足够大的负数）
+            # softmax 后 exp(-1e6) ≈ 0，相当于完全忽略这些位置
+            S_ij = tl.where(causal_mask, S_ij + (-1e6), S_ij)
+
         # ----- 5c. 计算当前块的行最大值 -----
         # tl.max(S_ij, axis=1) 沿列维度取最大值（每行一个最大值）
         # 形状: (Q_TILE_SIZE,)
@@ -246,7 +270,7 @@ class FlashAttentionTriton(torch.autograd.Function):
             Q:          (batch_size, seq_len, d) 查询张量
             K:          (batch_size, seq_len, d) 键张量
             V:          (batch_size, seq_len, d) 值张量
-            is_causal:  因果遮罩标志（暂不处理）
+            is_causal:  因果遮罩标志（True 时只允许 query 关注其之前的 key）
 
         返回:
             O:          (batch_size, seq_len, d) 注意力输出
@@ -306,12 +330,15 @@ class FlashAttentionTriton(torch.autograd.Function):
             D=d,
             Q_TILE_SIZE=Q_TILE_SIZE,
             K_TILE_SIZE=K_TILE_SIZE,
+            is_causal=is_causal,
             # 流水线级数：限制共享内存占用
             num_stages=num_stages,
         )
 
         # ----- 保存反向传播所需的张量 -----
         ctx.save_for_backward(L, Q, K, V, O)
+        # 保存因果掩码标志，反向传播时需要用同样的掩码
+        ctx.is_causal = is_causal
 
         return O
 
