@@ -102,7 +102,7 @@
 
 ### 注意力机制优化与 FlashAttention-2
 - [x] 使用 PyTorch 按照分块逻辑实现 FlashAttention-2 的前向传播；
-- [ ] 使用 Triton 语言编写 FlashAttention-2 的前向传播 Kernel；
+- [x] 使用 Triton 编写 FlashAttention-2 的前向传播 Kernel；
 - [ ] 用 Triton 纯手写反向传播内核；
 
 ### 分布式数据并行训练 (DDP)

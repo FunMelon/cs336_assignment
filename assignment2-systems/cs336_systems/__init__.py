@@ -3,10 +3,13 @@ try:
     from importlib.metadata import version
 
     from .flash_attention_pytorch import FlashAttention as FlashAttentionPyTorch
+    from .flash_attention import FlashAttentionTriton as FlashAttention
+
 
     __version__ = version("cs336-systems")
     __all__ = [
         "FlashAttentionPyTorch",
+        "FlashAttention",
     ]
 
 except Exception:
