@@ -95,7 +95,7 @@
 - `assignment2-systems/cs336_systems/pytorch_attention`: 测试原生注意力机制的脚本；
 - `assignment2-systems/cs336_systems/flash_attention_pytorch`: FlashAttention的PyTorch实现（其中的反向传播逻辑被Triton脚本服用）；
 - `assignment2-systems/cs336_systems/flash_attention`: FlashAttention的Triton实现；
-
+- `assignment2-systems/cs336_systems/flash_attention_benchmark`: FlashAttention的基准测试脚本；
 
 
 ### 性能分析与基准测试
