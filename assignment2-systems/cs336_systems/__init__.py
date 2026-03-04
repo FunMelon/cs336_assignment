@@ -1,3 +1,14 @@
-import importlib.metadata
+# cs336_systems/__init__.py
+try:
+    from importlib.metadata import version
 
-__version__ = importlib.metadata.version("cs336-systems")
+    from .flash_attention_pytorch import FlashAttention as FlashAttentionPyTorch
+
+    __version__ = version("cs336-systems")
+    __all__ = [
+        "FlashAttentionPyTorch",
+    ]
+
+except Exception:
+    # 开发环境下的版本号
+    __version__ = "0.1.0-dev"

@@ -101,7 +101,7 @@
 - [x] 使用 `torch.cuda.memory._record_memory_history` 分析模型峰值显存占用情况；
 
 ### 注意力机制优化与 FlashAttention-2
-- [ ] 使用 PyTorch 按照分块逻辑实现 FlashAttention-2 的前向传播；
+- [x] 使用 PyTorch 按照分块逻辑实现 FlashAttention-2 的前向传播；
 - [ ] 使用 Triton 语言编写 FlashAttention-2 的前向传播 Kernel；
 - [ ] 用 Triton 纯手写反向传播内核；
 
