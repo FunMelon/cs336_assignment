@@ -300,15 +300,83 @@ class Muon(torch.optim.Optimizer):
         return loss
 
 
+class RMSProp(torch.optim.Optimizer):
+    """实现 RMSProp 优化器（带解耦权重衰减）。
+    
+    RMSProp 只维护二阶矩（梯度平方的 EMA）用于自适应学习率缩放，
+    不包含内置的一阶动量。这使其非常适合与 Magma 配合使用，
+    因为 Magma 提供独立的动量-梯度对齐信号，两者职责互补、无冗余。
+    
+    更新规则：
+        v_t = α * v_{t-1} + (1 - α) * g_t²
+        θ_t = θ_{t-1} - lr * g_t / (√v_t + ε)
+        θ_t = θ_t * (1 - lr * weight_decay)  （解耦权重衰减）
+    """
+
+    def __init__(
+        self, params, lr=1e-3, alpha=0.99, eps=1e-8, weight_decay=0.0
+    ):
+        if lr < 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if not 0.0 <= alpha < 1.0:
+            raise ValueError(f"Invalid alpha value: {alpha}")
+        if eps < 0.0:
+            raise ValueError(f"Invalid epsilon value: {eps}")
+        if weight_decay < 0.0:
+            raise ValueError(f"Invalid weight decay value: {weight_decay}")
+
+        defaults = dict(lr=lr, alpha=alpha, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    def to(self, device: torch.device | str, dtype: torch.dtype) -> None:
+        for state in self.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            alpha = group["alpha"]
+            eps = group["eps"]
+            weight_decay = group["weight_decay"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state["v"] = torch.zeros_like(p.data)
+
+                v = state["v"]
+                # 更新二阶矩: v = α * v + (1 - α) * g²
+                v.mul_(alpha).addcmul_(grad, grad, value=1 - alpha)
+
+                # 参数更新: θ -= lr * g / (√v + ε)
+                denom = v.sqrt().add_(eps)
+                p.data.addcdiv_(grad, denom, value=-lr)
+
+                # 解耦权重衰减
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
+
+        return loss
+
+
 class Magma:
     """Magma (Momentum-aligned Gradient Masking) 优化器包装器。
     
-    Magma 是一种基于动量-梯度对齐的随机梯度掩码方法，可作为包装器应用于
-    任何自适应优化器（如 AdamW）或动量优化器（如 Muon）。
+    Magma 维护自己独立的一阶动量 μ（梯度的 EMA），用于计算与当前梯度的对齐度。
+    对齐度低的参数块会被缩放抑制，起到曲率依赖的几何正则化效果。
     
-    核心思想：通过计算每个参数块的一阶矩（动量）与当前梯度之间的余弦相似度，
-    对对齐度低的参数块按对齐分数缩放梯度，而对齐度高的块保持不变。
-    这引入了一种曲率依赖的几何正则化效果，平滑优化轨迹。
+    与底层优化器的关系：
+    - RMSProp（推荐）：RMSProp 只有二阶矩，Magma 提供一阶动量信号，职责互补
+    - Adam：Adam 自带一阶动量 m，与 Magma 的 μ 存在冗余，可能导致过度干预
     
     参考论文: arxiv 2602.15322
     """
@@ -319,49 +387,40 @@ class Magma:
         tau: float = 2.0,
         p: float = 0.5,
         ema_decay: float = 0.9,
+        beta: float = 0.9,
     ):
         """
         Args:
-            base_optimizer: 底层优化器实例（AdamW 或 Muon）
+            base_optimizer: 底层优化器实例
             tau: 温度参数，控制对齐分数的锐度，默认 2.0
             p: Bernoulli 存活概率（mask=1 保留原始梯度的概率），默认 0.5
             ema_decay: 对齐分数 EMA 衰减系数，默认 0.9
+            beta: Magma 自身动量 μ 的 EMA 系数，默认 0.9
         """
         self.base_optimizer = base_optimizer
         self.tau = tau
         self.p = p
         self.ema_decay = ema_decay
-        # 存储每个参数块的 EMA 对齐分数
-        self._alignment_ema = {}
+        self.beta = beta
+        self._momentum_buffers = {}  # param_id -> μ tensor（Magma 自己的动量）
+        self._alignment_ema = {}     # param_id -> EMA 对齐分数
 
     @property
     def param_groups(self):
         return self.base_optimizer.param_groups
-
-    def _get_momentum(self, param: torch.Tensor) -> torch.Tensor | None:
-        """从底层优化器获取参数的一阶矩估计（动量）。
-        
-        对于 AdamW，一阶矩为 state["m"]。
-        对于 Muon，一阶矩为 state["momentum_buffer"]。
-        """
-        state = self.base_optimizer.state.get(param, {})
-        if "m" in state:
-            return state["m"]
-        if "momentum_buffer" in state:
-            return state["momentum_buffer"]
-        return None
 
     @torch.no_grad()
     def step(self, closure=None):
         """执行 Magma 包装的优化步骤。
         
         步骤：
-        1. 对每个参数块计算动量-梯度对齐分数
-        2. 按对齐分数和随机掩码修改梯度
-        3. 调用底层优化器的 step()
-        4. 恢复被修改的梯度（确保梯度累积等场景不受影响）
+        1. 对每个参数块，更新 Magma 自己的动量 μ = β * μ + (1-β) * g
+        2. 计算动量-梯度对齐分数 s̃ = sigmoid(cossim(μ, g) / τ)
+        3. EMA 平滑对齐分数 s = 0.9 * s_prev + 0.1 * s̃
+        4. Bernoulli(p) 掩码：mask=0 时用 s 缩放梯度，mask=1 时保留原始梯度
+        5. 调用底层优化器 step()
+        6. 恢复被修改的梯度
         """
-        # 收集需要处理的参数及其原始梯度
         modified_params = []
 
         for group in self.base_optimizer.param_groups:
@@ -370,17 +429,17 @@ class Magma:
                     continue
 
                 grad = param.grad
-                momentum = self._get_momentum(param)
+                param_id = id(param)
 
-                # 第一步没有动量时跳过 Magma 掩码
-                if momentum is None:
-                    continue
+                # 更新 Magma 自己的动量: μ = β * μ + (1 - β) * g
+                if param_id not in self._momentum_buffers:
+                    self._momentum_buffers[param_id] = torch.zeros_like(grad)
+                mu = self._momentum_buffers[param_id]
+                mu.mul_(self.beta).add_(grad, alpha=1 - self.beta)
 
-                # 将 momentum 和 grad 展平计算余弦相似度
-                mu_flat = momentum.flatten().float()
+                # 计算余弦相似度: cossim(μ, g)
+                mu_flat = mu.flatten().float()
                 g_flat = grad.flatten().float()
-
-                # cossim(μ, g)
                 mu_norm = mu_flat.norm()
                 g_norm = g_flat.norm()
                 if mu_norm == 0 or g_norm == 0:
@@ -391,8 +450,7 @@ class Magma:
                 # 对齐分数: s̃ = sigmoid(cossim / τ)
                 alignment = torch.sigmoid(cossim / self.tau).item()
 
-                # EMA 更新对齐分数
-                param_id = id(param)
+                # EMA 平滑对齐分数
                 if param_id in self._alignment_ema:
                     s = self.ema_decay * self._alignment_ema[param_id] + (1 - self.ema_decay) * alignment
                 else:
@@ -407,12 +465,11 @@ class Magma:
                     original_grad = param.grad.clone()
                     param.grad.mul_(s)
                     modified_params.append((param, original_grad))
-                # mask == 1: 保留原始梯度，不做任何修改
 
         # 调用底层优化器
         loss = self.base_optimizer.step(closure)
 
-        # 恢复被修改的梯度（保证外部逻辑如梯度累积不受影响）
+        # 恢复被修改的梯度
         for param, original_grad in modified_params:
             param.grad.copy_(original_grad)
 
@@ -422,18 +479,58 @@ class Magma:
         self.base_optimizer.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self):
+        # 序列化时用参数索引映射替代 id(param)
+        param_to_idx = {}
+        idx = 0
+        for group in self.base_optimizer.param_groups:
+            for param in group["params"]:
+                param_to_idx[id(param)] = idx
+                idx += 1
+
+        momentum_state = {}
+        for pid, buf in self._momentum_buffers.items():
+            if pid in param_to_idx:
+                momentum_state[param_to_idx[pid]] = buf
+
+        alignment_state = {}
+        for pid, val in self._alignment_ema.items():
+            if pid in param_to_idx:
+                alignment_state[param_to_idx[pid]] = val
+
         return {
             "base_optimizer": self.base_optimizer.state_dict(),
-            "alignment_ema": dict(self._alignment_ema),
+            "momentum_buffers": momentum_state,
+            "alignment_ema": alignment_state,
         }
 
     def load_state_dict(self, state_dict):
         self.base_optimizer.load_state_dict(state_dict["base_optimizer"])
-        self._alignment_ema = state_dict.get("alignment_ema", {})
+
+        # 恢复时用参数索引重建 id 映射
+        idx_to_param_id = {}
+        idx = 0
+        for group in self.base_optimizer.param_groups:
+            for param in group["params"]:
+                idx_to_param_id[idx] = id(param)
+                idx += 1
+
+        self._momentum_buffers = {}
+        for str_idx, buf in state_dict.get("momentum_buffers", {}).items():
+            i = int(str_idx)
+            if i in idx_to_param_id:
+                self._momentum_buffers[idx_to_param_id[i]] = buf
+
+        self._alignment_ema = {}
+        for str_idx, val in state_dict.get("alignment_ema", {}).items():
+            i = int(str_idx)
+            if i in idx_to_param_id:
+                self._alignment_ema[idx_to_param_id[i]] = val
 
     def to(self, device, dtype):
         if hasattr(self.base_optimizer, "to"):
             self.base_optimizer.to(device, dtype)
+        for pid in self._momentum_buffers:
+            self._momentum_buffers[pid] = self._momentum_buffers[pid].to(device=device, dtype=dtype)
 
 
 if __name__ == "__main__":

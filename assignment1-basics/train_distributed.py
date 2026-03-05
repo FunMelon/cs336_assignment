@@ -15,8 +15,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from cs336_basics import (
     Transformer,
-    Muon,
-    AdamW,
+    RMSProp,
     Magma,
     get_batch,
     cross_entropy_loss,
@@ -53,17 +52,16 @@ lr_decay_ratio = 0.1          # 学习率从峰值衰减到最小值的比例 (m
 cosine_anneal_steps = iteration
 # 梯度裁剪参数
 max_grad_norm = 1.0
-# 优化器参数
-# Muon 参数 (用于 2D 权重矩阵)
-muon_lr = 0.02                # Muon 优化器的峰值学习率
-muon_momentum = 0.95          # Muon 动量系数
-muon_weight_decay = 0.0       # Muon 通常不需要权重衰减
-ns_steps = 5                  # Newton-Schulz 迭代次数
-# AdamW 参数 (用于 1D 参数、Embedding 等)
-adamw_lr = 1e-3               # AdamW 优化器的峰值学习率
-adamw_betas = (0.9, 0.95)
-adamw_eps = 1e-8
-adamw_weight_decay = 1e-2
+# RMSProp + Magma 优化器参数
+peak_lr = 1e-3                # 峰值学习率
+rmsprop_alpha = 0.99          # RMSProp 二阶矩 EMA 衰减系数
+rmsprop_eps = 1e-8
+weight_decay = 1e-2           # 权重衰减（仅对 2D 权重和 embedding 生效）
+# Magma 参数
+magma_tau = 2.0               # 温度参数
+magma_p = 0.5                 # Bernoulli 存活概率
+magma_ema_decay = 0.9         # 对齐分数 EMA 衰减
+magma_beta = 0.9              # Magma 独立动量 μ 的 EMA 系数
 
 # 分布式训练参数
 world_size = torch.cuda.device_count()  # 可用的GPU数量
@@ -201,43 +199,29 @@ def train_worker(rank, world_size):
     if rank == 0:
         print("torch.compile enabled")
     
-    # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
-    # 关键：Norm 层的仿射参数不应施加 Weight Decay，否则会破坏网络等变性映射
-    muon_params = []  # 2D 权重矩阵
-    adamw_decay_params = []  # 需要 weight decay 的参数（如 embedding）
-    adamw_nodecay_params = []  # 不需要 weight decay 的参数（bias、norm 层参数）
+    # 分离参数：2D 权重和 embedding 施加权重衰减，1D 参数（bias、norm）不施加
+    decay_params = []     # 2D 权重矩阵 + embedding
+    nodecay_params = []   # 1D 参数（bias、norm 层参数）
     
     for name, param in model.named_parameters():
         if param.requires_grad:
-            if param.ndim == 2 and 'embedding' not in name.lower():
-                # 2D 权重矩阵（排除 embedding）用 Muon
-                muon_params.append(param)
-            elif 'embedding' in name.lower():
-                # Embedding 参数需要 weight decay
-                adamw_decay_params.append(param)
+            if param.ndim >= 2:
+                decay_params.append(param)
             else:
-                # 1D 参数（bias）和 norm 层参数不需要 weight decay
-                # 这包括 LayerNorm/RMSNorm 的 weight(gamma) 和 bias(beta)
-                adamw_nodecay_params.append(param)
+                nodecay_params.append(param)
     
     if rank == 0:
-        print(f"Muon params: {len(muon_params)} tensors")
-        print(f"AdamW params (with decay): {len(adamw_decay_params)} tensors")
-        print(f"AdamW params (no decay): {len(adamw_nodecay_params)} tensors")
+        print(f"Params with weight decay: {len(decay_params)} tensors")
+        print(f"Params without weight decay: {len(nodecay_params)} tensors")
     
-    # 创建混合优化器，并使用 Magma 包装
-    # Magma (Momentum-aligned Gradient Masking) 通过动量-梯度对齐的随机掩码提升训练效率
-    muon_opt = Magma(
-        Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=muon_weight_decay, ns_steps=ns_steps),
-        tau=2.0, p=0.5, ema_decay=0.9,
-    )
-    # AdamW 使用参数组：embedding 有 weight decay，其他 1D 参数（bias、norm）无 weight decay
-    adamw_opt = Magma(
-        AdamW([
-            {'params': adamw_decay_params, 'weight_decay': adamw_weight_decay},
-            {'params': adamw_nodecay_params, 'weight_decay': 0.0}
-        ], lr=adamw_lr, betas=adamw_betas, eps=adamw_eps),
-        tau=2.0, p=0.5, ema_decay=0.9,
+    # 创建 RMSProp + Magma 优化器
+    # RMSProp 只有二阶矩（自适应学习率），Magma 提供独立的一阶动量对齐信号，职责互补
+    optimizer = Magma(
+        RMSProp([
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0},
+        ], lr=peak_lr, alpha=rmsprop_alpha, eps=rmsprop_eps),
+        tau=magma_tau, p=magma_p, ema_decay=magma_ema_decay, beta=magma_beta,
     )
     
     # 创建输出目录（只在rank 0进程）
@@ -291,8 +275,7 @@ def train_worker(rank, world_size):
         if rank == 0:
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.module.load_state_dict(checkpoint["model_state_dict"])
-            muon_opt.load_state_dict(checkpoint["muon_optimizer_state_dict"])
-            adamw_opt.load_state_dict(checkpoint["adamw_optimizer_state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             start_iteration = checkpoint["iteration"]
             print(f"Rank {rank}: Loaded checkpoint from iteration {start_iteration}")
         
@@ -322,16 +305,14 @@ def train_worker(rank, world_size):
     
     # 将模型移动到指定设备和数据类型
     model.to(device=device, dtype=dtype)
-    muon_opt.to(device=device, dtype=dtype)
-    adamw_opt.to(device=device, dtype=dtype)
+    optimizer.to(device=device, dtype=dtype)
     
     # 同步所有进程（确保所有进程都准备好了）
     dist.barrier()
     
     # 训练循环
     model.train()  # 设置模型为训练模式
-    muon_opt.zero_grad()  # 清空优化器梯度
-    adamw_opt.zero_grad()
+    optimizer.zero_grad()  # 清空优化器梯度
     
     if rank == 0:
         print(f"Rank {rank}: Starting distributed training on {world_size} GPUs")
@@ -371,11 +352,9 @@ def train_worker(rank, world_size):
             min_lr=lr_decay_ratio,   # 衰减到峰值的 lr_decay_ratio 倍
         )
         
-        # 更新各优化器的学习率：峰值学习率 × 调度因子
-        for param_group in muon_opt.param_groups:
-            param_group["lr"] = muon_lr * lr_factor
-        for param_group in adamw_opt.param_groups:
-            param_group["lr"] = adamw_lr * lr_factor
+        # 更新优化器学习率：峰值学习率 × 调度因子
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = peak_lr * lr_factor
         
         # 梯度累积优化：只在需要更新参数时同步梯度，避免中间步骤的无效通信
         is_sync_step = (iter + 1) % accumulation_steps == 0
@@ -389,10 +368,8 @@ def train_worker(rank, world_size):
         
         if is_sync_step:
             gradient_clipping(model.parameters(), max_norm=max_grad_norm)  # 梯度裁剪
-            muon_opt.step()  # Muon 更新 2D 权重矩阵
-            adamw_opt.step()  # AdamW 更新其他参数
-            muon_opt.zero_grad()
-            adamw_opt.zero_grad()
+            optimizer.step()   # RMSProp+Magma 更新所有参数
+            optimizer.zero_grad()
         
         # 只在rank 0进程显示进度和保存日志
         if rank == 0:
@@ -459,9 +436,8 @@ def train_worker(rank, world_size):
                 # 只在rank 0进程保存checkpoint
                 torch.save(
                     {
-                        "model_state_dict": model.module.state_dict(),  # 保存原始模型状态
-                        "muon_optimizer_state_dict": muon_opt.state_dict(),
-                        "adamw_optimizer_state_dict": adamw_opt.state_dict(),
+                        "model_state_dict": model.module.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
                         "iteration": iter,
                     },
                     checkpoint_path,

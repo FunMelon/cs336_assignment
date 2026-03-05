@@ -18,7 +18,7 @@ try:
         save_checkpoint,
         load_checkpoint,
     )
-    from .optimizer import AdamW, Muon, Magma
+    from .optimizer import AdamW, Muon, Magma, RMSProp
     from .module import (
         Linear,
         Embedding,
@@ -50,6 +50,7 @@ try:
         "AdamW",
         "Muon",
         "Magma",
+        "RMSProp",
         "cosine_anneal_schedule",
         "gradient_clipping",
         "get_batch",
