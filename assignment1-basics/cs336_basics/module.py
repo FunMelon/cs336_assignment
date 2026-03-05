@@ -263,6 +263,7 @@ class MultiheadSelfAttention(torch.nn.Module):
         rope: RoPE | None = None,
         device=None,
         dtype=None,
+        use_flash_attention: bool = False,
     ):
         """
         初始化多头自注意力模块，创建查询、键、值和输出线性层。
@@ -272,12 +273,14 @@ class MultiheadSelfAttention(torch.nn.Module):
             device (torch.device | None): 参数所在的设备。
             dtype (torch.dtype | None): 参数的数据类型。
             rope (RoPE | None): 可选的RoPE位置编码模块。
+            use_flash_attention (bool): 是否使用 FlashAttention 实现（需要安装 cs336_systems）。
         """
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads  # d_k = d_v = d_model / num_heads
+        self.use_flash_attention = use_flash_attention
 
         self.qkv_linear = Linear(
             d_model, d_model * 3, device, dtype
@@ -289,6 +292,17 @@ class MultiheadSelfAttention(torch.nn.Module):
         # QK-Norm: 对每个 head 的 Q 和 K 进行 RMSNorm 归一化
         self.q_norm = RMSNorm(self.d_k, device=device, dtype=dtype)
         self.k_norm = RMSNorm(self.d_k, device=device, dtype=dtype)
+        
+        # 尝试导入 FlashAttention（可选依赖）
+        if use_flash_attention:
+            try:
+                from cs336_systems.flash_attention import flash_attention_triton
+                self.flash_attn_fn = flash_attention_triton
+            except ImportError:
+                raise ImportError(
+                    "use_flash_attention=True requires cs336_systems to be installed. "
+                    "Please install it or set use_flash_attention=False."
+                )
 
     def forward(
         self, x: torch.Tensor, token_positions: torch.Tensor | None = None
@@ -332,17 +346,34 @@ class MultiheadSelfAttention(torch.nn.Module):
                 K, token_positions
             )  # (batch_size, num_heads, seq_len, d_k)
 
-        # 创建因果掩码（上三角为 -inf，下三角和对角线为 0）
-        # 使用加法掩码而非 bool 掩码，兼容 torch.compile
-        causal_mask = torch.triu(
-            torch.full((seq_len, seq_len), float("-inf"), device=x.device, dtype=x.dtype),
-            diagonal=1
-        )  # (seq_len, seq_len)
+        # 选择 attention 实现方式
+        if self.use_flash_attention:
+            # FlashAttention 路径：将多头维度合并到 batch 维度
+            # FlashAttention 期望输入: (batch_size, seq_len, d)
+            # 我们有: (batch_size, num_heads, seq_len, d_k)
+            # 重塑为: (batch_size * num_heads, seq_len, d_k)
+            Q_flat = Q.reshape(batch_size * self.num_heads, seq_len, self.d_k)
+            K_flat = K.reshape(batch_size * self.num_heads, seq_len, self.d_k)
+            V_flat = V.reshape(batch_size * self.num_heads, seq_len, self.d_k)
+            
+            # 调用 FlashAttention（带因果掩码）
+            attn_output_flat = self.flash_attn_fn(Q_flat, K_flat, V_flat, is_causal=True)
+            
+            # 重塑回: (batch_size, num_heads, seq_len, d_k)
+            attn_output = attn_output_flat.reshape(batch_size, self.num_heads, seq_len, self.d_k)
+        else:
+            # 原生 attention 路径
+            # 创建因果掩码（上三角为 -inf，下三角和对角线为 0）
+            # 使用加法掩码而非 bool 掩码，兼容 torch.compile
+            causal_mask = torch.triu(
+                torch.full((seq_len, seq_len), float("-inf"), device=x.device, dtype=x.dtype),
+                diagonal=1
+            )  # (seq_len, seq_len)
 
-        # 计算缩放点积注意力（使用自定义实现）
-        attn_output = scaled_dot_product_attention(
-            Q, K, V, attn_mask=causal_mask
-        )  # (batch_size, num_heads, seq_len, d_k)
+            # 计算缩放点积注意力（使用自定义实现）
+            attn_output = scaled_dot_product_attention(
+                Q, K, V, attn_mask=causal_mask
+            )  # (batch_size, num_heads, seq_len, d_k)
 
         # 拼接多个头的输出
         attn_output = (
@@ -370,6 +401,7 @@ class TransformerBlock(torch.nn.Module):
         rope: RoPE | None = None,
         device=None,
         dtype=None,
+        use_flash_attention: bool = False,
     ):
         """
         初始化Transformer块，创建多头自注意力、前馈网络和RMS归一化层。
@@ -380,9 +412,10 @@ class TransformerBlock(torch.nn.Module):
             device (torch.device | None): 参数所在的设备。
             dtype (torch.dtype | None): 参数的数据类型。
             rope (RoPE | None): 可选的RoPE位置编码模块。
+            use_flash_attention (bool): 是否使用 FlashAttention 实现。
         """
         super().__init__()
-        self.mhsa = MultiheadSelfAttention(d_model, num_heads, rope, device, dtype)
+        self.mhsa = MultiheadSelfAttention(d_model, num_heads, rope, device, dtype, use_flash_attention)
         self.ffn = PositionwiseFeedForward(d_model, d_ff, device, dtype)
         self.norm1 = RMSNorm(d_model, device=device, dtype=dtype)
         self.norm2 = RMSNorm(d_model, device=device, dtype=dtype)

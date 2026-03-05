@@ -17,6 +17,7 @@ class Transformer(torch.nn.Module):
         rope_theta: float = 10000.0,
         logit_cap: float = 0.0,
         tie_weights: bool = False,
+        use_flash_attention: bool = False,
         tokenizer: Tokenizer | None = None,
         device=None,
         dtype=None,
@@ -29,6 +30,10 @@ class Transformer(torch.nn.Module):
             nhead (int): 多头注意力机制中的头数。
             num_layers (int): Transformer块的数量。
             d_ff (int): 前馈网络的隐藏层维度。
+            rope_theta (float): RoPE位置编码的theta参数。
+            logit_cap (float): Logit Softcapping阈值。
+            tie_weights (bool): 是否共享embedding和lm_head的权重。
+            use_flash_attention (bool): 是否使用FlashAttention优化（需要安装cs336_systems）。
             tokenizer (Tokenizer, optional): 分词器，用于生成文本输出。
             device: 设备信息（如 'cpu' 或 'cuda'）。
             dtype: 数据类型（如 torch.float32）。
@@ -42,6 +47,7 @@ class Transformer(torch.nn.Module):
         self.d_ff = d_ff
         self.logit_cap = logit_cap
         self.tie_weights = tie_weights
+        self.use_flash_attention = use_flash_attention
         self.tokenizer = tokenizer
         self.device = device == None and torch.device("cpu") or device
         self.dtype = dtype == None and torch.float32 or dtype
@@ -56,7 +62,8 @@ class Transformer(torch.nn.Module):
         self.transformer_blocks = torch.nn.ModuleList(
             [
                 TransformerBlock(
-                    d_model, nhead, d_ff, rope=rope, device=device, dtype=dtype
+                    d_model, nhead, d_ff, rope=rope, device=device, dtype=dtype,
+                    use_flash_attention=use_flash_attention
                 )
                 for _ in range(num_layers)
             ]

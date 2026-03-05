@@ -27,12 +27,12 @@ from cs336_basics import (
 output_path = "./out"
 train_dataset_path = "../../cs336_data/id/owt-t-id/owt_train.bin"
 valid_dataset_path = "../../cs336_data/id/owt-v-id/owt_valid.bin"
-batch_size = 16  # 每个GPU的batch size
-iteration = 100000 
+batch_size = 48  # 每个GPU的batch size
+iteration = 50000 
 saving_interval = -1
 valid_frequency = 1000
 valid_batch_multiples = 8
-accumulation_steps = 4
+accumulation_steps = 2
 # Early Stopping 超参数
 early_stopping_patience = 15  # 连续 N 次验证无改善则停止
 early_stopping_min_delta = 0.01  # 最小改善阈值
@@ -45,6 +45,7 @@ num_layers = 12
 d_ff = 2048
 rope_theta = 10000.0
 logit_cap = 30.0  # Logit Softcapping 阈值，防止logits爆炸
+use_flash_attention = True  # 使用FlashAttention优化（需要cs336_systems包）
 dtype = torch.float32
 # 学习率调度参数
 warmup_ratio = 0.05           # 预热阶段占总步数的比例
@@ -182,6 +183,7 @@ def train_worker(rank, world_size):
         num_layers=num_layers,
         d_ff=d_ff,
         logit_cap=logit_cap,
+        use_flash_attention=use_flash_attention,
         device=device,
         tie_weights=False,
     )
@@ -199,6 +201,8 @@ def train_worker(rank, world_size):
     model = torch.compile(model, mode="default")
     if rank == 0:
         print("torch.compile enabled")
+        if use_flash_attention:
+            print("FlashAttention enabled (using Triton kernels)")
     
     # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
     # 关键：Norm 层的仿射参数不应施加 Weight Decay，否则会破坏网络等变性映射
