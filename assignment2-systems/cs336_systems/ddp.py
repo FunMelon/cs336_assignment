@@ -1,0 +1,581 @@
+import os
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from contextlib import nullcontext
+import time
+import csv
+import matplotlib.pyplot as plt
+import pandas as pd
+import tqdm
+
+from cs336_basics import (
+    Transformer,
+    Muon,
+    AdamW,
+    get_batch,
+    cross_entropy_loss,
+    cosine_anneal_schedule,
+    gradient_clipping,
+)
+
+
+# ==================== 训练配置 ====================
+# 输出和数据集路径
+output_path = "./out"
+train_dataset_path = "../../../cs336_data/id/owt-t-id/owt_train.bin"
+valid_dataset_path = "../../../cs336_data/id/owt-v-id/owt_valid.bin"
+
+# 模型超参数
+vocab_size = 32000
+context_length = 1024
+d_model = 768           # 768/12 = 64 (2的幂，支持Flash Attention)
+nhead = 12
+num_layers = 12
+d_ff = 2048
+rope_theta = 10000.0
+logit_cap = 30.0
+use_flash_attention = True
+dtype = torch.float32
+
+# 训练超参数
+batch_size = 48         # 每个GPU的batch size
+iteration = 50000       # 总训练步数
+saving_interval = -1    # Checkpoint保存间隔（-1=不保存中间checkpoint）
+valid_frequency = 1000  # 验证频率
+valid_batch_multiples = 8  # 验证时使用的batch数量
+accumulation_steps = 2  # 梯度累积步数
+
+# Early Stopping 超参数
+early_stopping_patience = 15  # 连续N次验证无改善则停止
+early_stopping_min_delta = 0.01  # 最小改善阈值
+
+# 学习率调度参数
+warmup_ratio = 0.05     # 预热阶段占总步数的比例
+lr_decay_ratio = 0.1    # 学习率从峰值衰减到最小值的比例
+
+# 梯度裁剪参数
+max_grad_norm = 1.0
+
+# 优化器参数
+# Muon 参数 (用于 2D 权重矩阵)
+muon_lr = 0.02
+muon_momentum = 0.95
+muon_weight_decay = 0.0
+ns_steps = 5
+
+# AdamW 参数 (用于 1D 参数、Embedding 等)
+adamw_lr = 1e-3
+adamw_betas = (0.9, 0.95)
+adamw_eps = 1e-8
+adamw_weight_decay = 1e-2
+
+# 性能优化参数
+enable_tf32 = False     # TF32优化（Ampere+ GPU）
+enable_amp = False      # 混合精度训练（AMP）
+amp_dtype = 'float16'   # AMP数据类型：'float16' 或 'bfloat16'
+enable_compile = False  # torch.compile优化（需要PyTorch 2.0+）
+
+# 分布式训练参数
+world_size = torch.cuda.device_count()  # 可用的GPU数量
+dist_url = "env://"
+
+
+def setup_distributed(rank, world_size):
+    """设置分布式训练环境"""
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=dist_url,
+        world_size=world_size,
+        rank=rank
+    )
+    torch.manual_seed(42 + rank)
+
+
+def cleanup_distributed():
+    """清理分布式环境"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def evaluate_validation_loss(
+    model: torch.nn.Module,
+    dataset: np.memmap,
+    batch_size: int,
+    context_length: int,
+    device: str,
+    num_batches: int = 5,
+) -> float:
+    """评估验证集上的平均损失"""
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for _ in range(num_batches):
+            input_batch, target_batch = get_batch(
+                dataset,
+                batch_size=batch_size,
+                context_length=context_length,
+                device=device,
+            )
+            input_batch = input_batch.to(dtype=torch.int)
+            target_batch = target_batch.to(dtype=torch.int)
+
+            logits = model(input_batch)
+            val_loss = cross_entropy_loss(logits, target_batch)
+            losses.append(val_loss.item())
+    model.train()
+    return sum(losses) / len(losses)
+
+
+def save_log(
+    log_path: str,
+    step: int,
+    wallclock_time: float,
+    train_loss: float,
+    val_loss: float | None,
+    lr: float,
+    rank: int,
+) -> None:
+    """保存日志到CSV文件（只在rank 0进程保存）"""
+    if rank != 0:
+        return
+        
+    with open(log_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                step,
+                wallclock_time,
+                train_loss,
+                val_loss,
+                lr,
+            ]
+        )
+
+
+def plot_logs(log_path: str, output_dir: str, rank: int) -> None:
+    """绘制训练和验证损失曲线（只在rank 0进程执行）"""
+    if rank != 0:
+        return
+        
+    df = pd.read_csv(log_path)
+    plt.figure(figsize=(10, 6))
+    plt.plot(df["step"], df["train_loss"], label="Train Loss")
+    plt.plot(df["step"], df["val_loss"], label="Validation Loss")
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss over Iterations")
+    plt.legend()
+    plt.grid()
+    plt.savefig(os.path.join(output_dir, "loss_curve.png"))
+    plt.close()
+
+
+def train_worker(rank, world_size, config):
+    """每个训练进程的入口函数"""
+    try:
+        setup_distributed(rank, world_size)
+        device = f"cuda:{rank}"
+        
+        # 设置TF32（如果启用）
+        if config.get('enable_tf32', False):
+            torch.set_float32_matmul_precision('high')
+            if rank == 0:
+                print("TF32 enabled for float32 matmul")
+        
+        # 创建模型
+        model = Transformer(
+            vocab_size=vocab_size,
+            context_length=context_length,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            d_ff=d_ff,
+            rope_theta=rope_theta,
+            logit_cap=logit_cap,
+            use_flash_attention=use_flash_attention,
+            device=device,
+            tie_weights=False,
+        )
+        
+        # 使用DistributedDataParallel包装模型
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[rank],
+            output_device=rank
+        )
+        
+        # 使用torch.compile优化（如果启用）
+        if config.get('enable_compile', False):
+            model = torch.compile(model, mode="default")
+            if rank == 0:
+                print("torch.compile enabled")
+        
+        if rank == 0:
+            print("\n" + "=" * 80)
+            print("DDP Training with cs336 Transformer")
+            print("=" * 80)
+            num_params = sum(p.numel() for p in model.parameters())
+            print(f"Model: {num_params:,} parameters ({num_params/1e6:.2f}M)")
+            if use_flash_attention:
+                print("FlashAttention enabled (using Triton kernels)")
+            print(f"GPUs: {world_size} | Batch/GPU: {batch_size} | Global Batch: {batch_size * world_size}")
+            print("=" * 80 + "\n")
+        
+        # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
+        muon_params = []
+        adamw_decay_params = []
+        adamw_nodecay_params = []
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                if param.ndim == 2 and 'embedding' not in name.lower():
+                    muon_params.append(param)
+                elif 'embedding' in name.lower():
+                    adamw_decay_params.append(param)
+                else:
+                    adamw_nodecay_params.append(param)
+        
+        if rank == 0:
+            print(f"Optimizer Setup:")
+            print(f"  - Muon params: {len(muon_params)} tensors (2D weights)")
+            print(f"  - AdamW params (w/ decay): {len(adamw_decay_params)} tensors (embeddings)")
+            print(f"  - AdamW params (no decay): {len(adamw_nodecay_params)} tensors (bias, norm)\n")
+        
+        # 创建混合优化器
+        muon_opt = Muon(
+            muon_params,
+            lr=muon_lr,
+            momentum=muon_momentum,
+            weight_decay=muon_weight_decay,
+            ns_steps=ns_steps,
+        )
+        adamw_opt = AdamW(
+            [
+                {'params': adamw_decay_params, 'weight_decay': adamw_weight_decay},
+                {'params': adamw_nodecay_params, 'weight_decay': 0.0},
+            ],
+            lr=adamw_lr,
+            betas=adamw_betas,
+            eps=adamw_eps,
+        )
+        
+        # 创建输出目录（只在rank 0进程）
+        if rank == 0:
+            os.makedirs(output_path, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+            out_dir = os.path.join(output_path, f"{timestamp}")
+            os.makedirs(out_dir, exist_ok=True)
+            checkpoint_path = os.path.join(out_dir, "checkpoint.pth")
+            
+            # 创建日志文件
+            log_path = os.path.join(out_dir, "log.csv")
+            with open(log_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["step", "wallclock_time", "train_loss", "val_loss", "lr"])
+        else:
+            out_dir = ""
+            checkpoint_path = ""
+            log_path = ""
+        
+        # 同步输出目录路径给所有进程
+        out_dir_tensor = torch.zeros(256, dtype=torch.uint8, device=device)
+        if rank == 0:
+            out_dir_bytes = [ord(c) for c in out_dir[:255]]
+            out_dir_tensor[:len(out_dir_bytes)] = torch.tensor(out_dir_bytes, dtype=torch.uint8, device=device)
+        
+        dist.broadcast(out_dir_tensor, src=0)
+        
+        if rank != 0:
+            out_dir_chars = out_dir_tensor.cpu().tolist()
+            out_dir = ''.join(chr(c) for c in out_dir_chars if c != 0)
+            checkpoint_path = os.path.join(out_dir, "checkpoint.pth")
+            log_path = os.path.join(out_dir, "log.csv")
+        
+        # 加载checkpoint（如果存在）
+        start_iteration = 0
+        checkpoint_exists = False
+        
+        if rank == 0:
+            checkpoint_exists = os.path.exists(checkpoint_path)
+        
+        checkpoint_exists_tensor = torch.tensor([1 if checkpoint_exists else 0], dtype=torch.int, device=device)
+        dist.broadcast(checkpoint_exists_tensor, src=0)
+        checkpoint_exists = checkpoint_exists_tensor.item() == 1
+        
+        if checkpoint_exists:
+            if rank == 0:
+                checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+                model.module.load_state_dict(checkpoint["model_state_dict"])
+                muon_opt.load_state_dict(checkpoint["muon_optimizer_state_dict"])
+                adamw_opt.load_state_dict(checkpoint["adamw_optimizer_state_dict"])
+                start_iteration = checkpoint["iteration"]
+                print(f"Loaded checkpoint from iteration {start_iteration}\n")
+            
+            start_iteration_tensor = torch.tensor([start_iteration], dtype=torch.long, device=device)
+            dist.broadcast(start_iteration_tensor, src=0)
+            start_iteration = start_iteration_tensor.item()
+            
+            for param in model.parameters():
+                dist.broadcast(param.data, src=0)
+        else:
+            if rank == 0:
+                print("No checkpoint found, starting from scratch.\n")
+        
+        # 加载真实数据集
+        train_dataset = np.memmap(
+            train_dataset_path,
+            dtype=np.uint16,
+            mode="r",
+        )
+        valid_dataset = np.memmap(
+            valid_dataset_path,
+            dtype=np.uint16,
+            mode="r",
+        )
+        total_iterations = iteration
+        if rank == 0:
+            print(f"Using real dataset: {train_dataset_path}")
+        
+        # 将模型移动到指定设备和数据类型
+        model.to(device=device, dtype=dtype)
+        muon_opt.to(device=device, dtype=dtype)
+        adamw_opt.to(device=device, dtype=dtype)
+        
+        # 同步所有进程
+        dist.barrier()
+        
+        # 训练循环
+        model.train()
+        muon_opt.zero_grad()
+        adamw_opt.zero_grad()
+        
+        if rank == 0:
+            print(f"Starting training from iteration {start_iteration} to {total_iterations}...")
+            print(f"Output directory: {out_dir}\n")
+            pbar = tqdm.tqdm(total=total_iterations, initial=start_iteration)
+        
+        # Early Stopping 状态
+        best_val_loss = float('inf')
+        patience_counter = 0
+        early_stop_flag = False
+        
+        start_time = time.time()
+        for iter_idx in range(start_iteration, total_iterations):
+            # 获取数据
+            input_batch, target_batch = get_batch(
+                train_dataset,
+                batch_size=batch_size,
+                context_length=context_length,
+                device=device,
+            )
+            
+            input_batch = input_batch.to(dtype=torch.int)
+            target_batch = target_batch.to(dtype=torch.int)
+            
+            # 计算学习率调度因子
+            lr_factor = cosine_anneal_schedule(
+                current_step=iter_idx,
+                warmup_steps=int(warmup_ratio * iteration),
+                cosine_anneal_steps=iteration,
+                max_lr=1.0,
+                min_lr=lr_decay_ratio,
+            )
+            
+            # 更新学习率
+            for param_group in muon_opt.param_groups:
+                param_group["lr"] = muon_lr * lr_factor
+            for param_group in adamw_opt.param_groups:
+                param_group["lr"] = adamw_lr * lr_factor
+            
+            # 梯度累积优化
+            is_sync_step = (iter_idx + 1) % accumulation_steps == 0
+            sync_context = nullcontext() if is_sync_step else model.no_sync()
+            
+            with sync_context:
+                logits = model(input_batch)
+                loss = cross_entropy_loss(logits, target_batch)
+                loss_scaled = loss / accumulation_steps
+                loss_scaled.backward()
+            
+            if is_sync_step:
+                gradient_clipping(model.parameters(), max_norm=max_grad_norm)
+                muon_opt.step()
+                adamw_opt.step()
+                muon_opt.zero_grad()
+                adamw_opt.zero_grad()
+            
+            # 只在rank 0进程显示进度和保存日志
+            if rank == 0:
+                if iter_idx % 10 == 0:
+                    pbar.set_description(
+                        f"Loss: {loss.item():.4f}, LR: {lr_factor:.4f}"
+                    )
+                
+                # 验证和日志记录
+                if (
+                    iter_idx == 0 or (iter_idx + 1) % valid_frequency == 0 or iter_idx == total_iterations - 1
+                ):
+                    val_loss = evaluate_validation_loss(
+                        model.module,
+                        valid_dataset,
+                        batch_size,
+                        context_length,
+                        device,
+                        valid_batch_multiples,
+                    )
+                    
+                    # Early Stopping 检查
+                    if val_loss < best_val_loss - early_stopping_min_delta:
+                        best_val_loss = val_loss
+                        patience_counter = 0
+                        best_model_path = os.path.join(out_dir, "best_model.pth")
+                        torch.save(model.module.state_dict(), best_model_path)
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= early_stopping_patience:
+                            print(f"\nEarly stopping triggered at iteration {iter_idx + 1}")
+                            print(f"  Best validation loss: {best_val_loss:.4f}")
+                            early_stop_flag = True
+                    
+                    # 记录日志
+                    save_log(
+                        log_path,
+                        step=iter_idx + 1,
+                        wallclock_time=time.time() - start_time,
+                        train_loss=loss.item(),
+                        val_loss=val_loss,
+                        lr=lr_factor,
+                        rank=rank,
+                    )
+                    
+                    # 保存损失曲线图
+                    plot_logs(log_path, out_dir, rank)
+            
+            # 检查是否需要 early stop
+            early_stop_tensor = torch.tensor([1 if early_stop_flag else 0], dtype=torch.int, device=device)
+            dist.broadcast(early_stop_tensor, src=0)
+            if early_stop_tensor.item() == 1:
+                if rank == 0:
+                    print("All processes stopping due to early stopping.")
+                break
+            
+            if rank == 0:
+                # 保存checkpoint
+                should_save_checkpoint = saving_interval > 0 and (
+                    (iter_idx + 1) % saving_interval == 0 or iter_idx == total_iterations - 1
+                )
+                if should_save_checkpoint:
+                    torch.save(
+                        {
+                            "model_state_dict": model.module.state_dict(),
+                            "muon_optimizer_state_dict": muon_opt.state_dict(),
+                            "adamw_optimizer_state_dict": adamw_opt.state_dict(),
+                            "iteration": iter_idx,
+                        },
+                        checkpoint_path,
+                    )
+                
+                # 最后一次迭代时，单独保存模型文件
+                if iter_idx == total_iterations - 1:
+                    model_only_path = os.path.join(out_dir, "model.pth")
+                    torch.save(model.module.state_dict(), model_only_path)
+                    print(f"\nModel saved to {model_only_path}")
+                
+                pbar.update(1)
+        
+        if rank == 0:
+            if early_stop_flag:
+                print(f"\nTraining ended via early stopping. Best val_loss: {best_val_loss:.4f}")
+            pbar.close()
+            print("\n" + "=" * 80)
+            print("Training Completed!")
+            print("=" * 80 + "\n")
+    
+    except Exception as e:
+        if rank == 0:
+            print(f"\nError during training: {e}")
+            import traceback
+            traceback.print_exc()
+        raise
+    finally:
+        cleanup_distributed()
+
+
+def main():
+    """主函数：启动分布式训练
+    
+    支持两种启动方式：
+    1. torchrun 方式（推荐）: torchrun --nproc_per_node=N ddp.py [options]
+    2. 直接运行方式: python ddp.py [options]
+    
+    示例：
+      torchrun --nproc_per_node=2 ddp.py --enable_tf32
+      torchrun --nproc_per_node=4 ddp.py --enable_tf32 --enable_compile --enable_amp --amp_dtype bfloat16
+    """
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="DDP Training with cs336 Transformer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  torchrun --nproc_per_node=2 ddp.py --enable_tf32
+  torchrun --nproc_per_node=4 ddp.py --enable_tf32 --enable_compile --enable_amp
+        """
+    )
+    
+    # 仅保留性能优化选项
+    parser.add_argument("--enable_tf32", action="store_true", default=enable_tf32,
+                       help="启用TF32加速（Ampere+ GPU）")
+    parser.add_argument("--enable_amp", action="store_true", default=enable_amp,
+                       help="启用混合精度训练（AMP）")
+    parser.add_argument("--amp_dtype", type=str, default=amp_dtype, 
+                       choices=["float16", "bfloat16"],
+                       help="AMP数据类型")
+    parser.add_argument("--enable_compile", action="store_true", default=enable_compile,
+                       help="启用torch.compile编译优化（PyTorch 2.0+）")
+    
+    args = parser.parse_args()
+    
+    config = {
+        'enable_tf32': args.enable_tf32,
+        'enable_amp': args.enable_amp,
+        'amp_dtype': args.amp_dtype,
+        'enable_compile': args.enable_compile,
+    }
+    
+    # 检查是否由 torchrun 启动（环境变量 RANK 存在）
+    if "RANK" in os.environ:
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        ws = int(os.environ["WORLD_SIZE"])
+        
+        if rank == 0:
+            print(f"Detected {ws} GPUs, starting distributed training (torchrun)...\n")
+        
+        train_worker(local_rank, ws, config)
+    else:
+        ws = torch.cuda.device_count()
+        
+        if ws < 2:
+            print("Warning: fewer than 2 GPUs detected, using single GPU...\n")
+            ws = 1
+        
+        print(f"Detected {ws} GPUs, starting distributed training (mp.spawn)...\n")
+        
+        if ws == 1:
+            train_worker(0, 1, config)
+        else:
+            mp.spawn(
+                train_worker,
+                args=(ws, config),
+                nprocs=ws,
+                join=True
+            )
+
+
+if __name__ == "__main__":
+    main()
