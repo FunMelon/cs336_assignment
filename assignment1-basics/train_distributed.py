@@ -17,6 +17,7 @@ from cs336_basics import (
     Transformer,
     Muon,
     AdamW,
+    Magma,
     get_batch,
     cross_entropy_loss,
     cosine_anneal_schedule,
@@ -224,13 +225,20 @@ def train_worker(rank, world_size):
         print(f"AdamW params (with decay): {len(adamw_decay_params)} tensors")
         print(f"AdamW params (no decay): {len(adamw_nodecay_params)} tensors")
     
-    # 创建混合优化器
-    muon_opt = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=muon_weight_decay, ns_steps=ns_steps)
+    # 创建混合优化器，并使用 Magma 包装
+    # Magma (Momentum-aligned Gradient Masking) 通过动量-梯度对齐的随机掩码提升训练效率
+    muon_opt = Magma(
+        Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=muon_weight_decay, ns_steps=ns_steps),
+        tau=2.0, p=0.5, ema_decay=0.9,
+    )
     # AdamW 使用参数组：embedding 有 weight decay，其他 1D 参数（bias、norm）无 weight decay
-    adamw_opt = AdamW([
-        {'params': adamw_decay_params, 'weight_decay': adamw_weight_decay},
-        {'params': adamw_nodecay_params, 'weight_decay': 0.0}
-    ], lr=adamw_lr, betas=adamw_betas, eps=adamw_eps)
+    adamw_opt = Magma(
+        AdamW([
+            {'params': adamw_decay_params, 'weight_decay': adamw_weight_decay},
+            {'params': adamw_nodecay_params, 'weight_decay': 0.0}
+        ], lr=adamw_lr, betas=adamw_betas, eps=adamw_eps),
+        tau=2.0, p=0.5, ema_decay=0.9,
+    )
     
     # 创建输出目录（只在rank 0进程）
     if rank == 0:

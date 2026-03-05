@@ -300,6 +300,142 @@ class Muon(torch.optim.Optimizer):
         return loss
 
 
+class Magma:
+    """Magma (Momentum-aligned Gradient Masking) 优化器包装器。
+    
+    Magma 是一种基于动量-梯度对齐的随机梯度掩码方法，可作为包装器应用于
+    任何自适应优化器（如 AdamW）或动量优化器（如 Muon）。
+    
+    核心思想：通过计算每个参数块的一阶矩（动量）与当前梯度之间的余弦相似度，
+    对对齐度低的参数块按对齐分数缩放梯度，而对齐度高的块保持不变。
+    这引入了一种曲率依赖的几何正则化效果，平滑优化轨迹。
+    
+    参考论文: arxiv 2602.15322
+    """
+
+    def __init__(
+        self,
+        base_optimizer: torch.optim.Optimizer,
+        tau: float = 2.0,
+        p: float = 0.5,
+        ema_decay: float = 0.9,
+    ):
+        """
+        Args:
+            base_optimizer: 底层优化器实例（AdamW 或 Muon）
+            tau: 温度参数，控制对齐分数的锐度，默认 2.0
+            p: Bernoulli 存活概率（mask=1 保留原始梯度的概率），默认 0.5
+            ema_decay: 对齐分数 EMA 衰减系数，默认 0.9
+        """
+        self.base_optimizer = base_optimizer
+        self.tau = tau
+        self.p = p
+        self.ema_decay = ema_decay
+        # 存储每个参数块的 EMA 对齐分数
+        self._alignment_ema = {}
+
+    @property
+    def param_groups(self):
+        return self.base_optimizer.param_groups
+
+    def _get_momentum(self, param: torch.Tensor) -> torch.Tensor | None:
+        """从底层优化器获取参数的一阶矩估计（动量）。
+        
+        对于 AdamW，一阶矩为 state["m"]。
+        对于 Muon，一阶矩为 state["momentum_buffer"]。
+        """
+        state = self.base_optimizer.state.get(param, {})
+        if "m" in state:
+            return state["m"]
+        if "momentum_buffer" in state:
+            return state["momentum_buffer"]
+        return None
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """执行 Magma 包装的优化步骤。
+        
+        步骤：
+        1. 对每个参数块计算动量-梯度对齐分数
+        2. 按对齐分数和随机掩码修改梯度
+        3. 调用底层优化器的 step()
+        4. 恢复被修改的梯度（确保梯度累积等场景不受影响）
+        """
+        # 收集需要处理的参数及其原始梯度
+        modified_params = []
+
+        for group in self.base_optimizer.param_groups:
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+
+                grad = param.grad
+                momentum = self._get_momentum(param)
+
+                # 第一步没有动量时跳过 Magma 掩码
+                if momentum is None:
+                    continue
+
+                # 将 momentum 和 grad 展平计算余弦相似度
+                mu_flat = momentum.flatten().float()
+                g_flat = grad.flatten().float()
+
+                # cossim(μ, g)
+                mu_norm = mu_flat.norm()
+                g_norm = g_flat.norm()
+                if mu_norm == 0 or g_norm == 0:
+                    continue
+
+                cossim = torch.dot(mu_flat, g_flat) / (mu_norm * g_norm)
+
+                # 对齐分数: s̃ = sigmoid(cossim / τ)
+                alignment = torch.sigmoid(cossim / self.tau).item()
+
+                # EMA 更新对齐分数
+                param_id = id(param)
+                if param_id in self._alignment_ema:
+                    s = self.ema_decay * self._alignment_ema[param_id] + (1 - self.ema_decay) * alignment
+                else:
+                    s = alignment
+                self._alignment_ema[param_id] = s
+
+                # Bernoulli 掩码采样
+                mask = 1 if torch.rand(1).item() < self.p else 0
+
+                if mask == 0:
+                    # 掩码为 0：用对齐分数缩放梯度
+                    original_grad = param.grad.clone()
+                    param.grad.mul_(s)
+                    modified_params.append((param, original_grad))
+                # mask == 1: 保留原始梯度，不做任何修改
+
+        # 调用底层优化器
+        loss = self.base_optimizer.step(closure)
+
+        # 恢复被修改的梯度（保证外部逻辑如梯度累积不受影响）
+        for param, original_grad in modified_params:
+            param.grad.copy_(original_grad)
+
+        return loss
+
+    def zero_grad(self, set_to_none=True):
+        self.base_optimizer.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return {
+            "base_optimizer": self.base_optimizer.state_dict(),
+            "alignment_ema": dict(self._alignment_ema),
+        }
+
+    def load_state_dict(self, state_dict):
+        self.base_optimizer.load_state_dict(state_dict["base_optimizer"])
+        self._alignment_ema = state_dict.get("alignment_ema", {})
+
+    def to(self, device, dtype):
+        if hasattr(self.base_optimizer, "to"):
+            self.base_optimizer.to(device, dtype)
+
+
 if __name__ == "__main__":
     weights = torch.nn.Parameter(
         5 * torch.randn((10, 10))
