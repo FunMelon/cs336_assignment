@@ -303,14 +303,19 @@ class Muon(torch.optim.Optimizer):
 class Magma:
     """Magma (Momentum-aligned Gradient Masking) 优化器包装器。
     
-    Magma 是一种基于动量-梯度对齐的随机梯度掩码方法，可作为包装器应用于
-    任何自适应优化器（如 AdamW）或动量优化器（如 Muon）。
+    严格按照论文 arxiv 2602.15322 Algorithm 1 实现。
     
-    核心思想：通过计算每个参数块的一阶矩（动量）与当前梯度之间的余弦相似度，
-    对对齐度低的参数块按对齐分数缩放梯度，而对齐度高的块保持不变。
-    这引入了一种曲率依赖的几何正则化效果，平滑优化轨迹。
+    算法核心：对底层优化器产生的更新量 Δ_t^(b) 进行 block-wise 调制：
+        θ_{t+1}^(b) = θ_t^(b) - s_t^(b) * m_t^(b) * Δ_t^(b)
     
-    参考论文: arxiv 2602.15322
+    其中：
+    - μ_t^(b): 底层优化器的一阶矩估计（AdamW 的 m，Muon 的 momentum_buffer）
+    - s̃_t^(b) = sigmoid(cossim(μ_t^(b), g_t^(b)) / τ)  对齐分数
+    - s_t^(b) = 0.9 * s_{t-1}^(b) + 0.1 * s̃_t^(b)      EMA 平滑
+    - m_t^(b) ~ Bernoulli(p)                              随机掩码
+    
+    当 m=0 时：整个 block 的更新被完全跳过
+    当 m=1 时：更新量被对齐分数 s 缩放
     """
 
     def __init__(
@@ -323,26 +328,28 @@ class Magma:
         """
         Args:
             base_optimizer: 底层优化器实例（AdamW 或 Muon）
-            tau: 温度参数，控制对齐分数的锐度，默认 2.0
-            p: Bernoulli 存活概率（mask=1 保留原始梯度的概率），默认 0.5
-            ema_decay: 对齐分数 EMA 衰减系数，默认 0.9
+            tau: 温度参数，控制 sigmoid 锐度，默认 2.0（论文推荐值）
+            p: Bernoulli 存活概率，默认 0.5（论文推荐值）
+            ema_decay: 对齐分数 EMA 衰减系数，默认 0.9（论文固定值）
         """
         self.base_optimizer = base_optimizer
         self.tau = tau
         self.p = p
         self.ema_decay = ema_decay
-        # 存储每个参数块的 EMA 对齐分数
-        self._alignment_ema = {}
+        self._alignment_ema = {}  # param_id -> EMA 对齐分数 s_t^(b)
 
     @property
     def param_groups(self):
         return self.base_optimizer.param_groups
 
-    def _get_momentum(self, param: torch.Tensor) -> torch.Tensor | None:
-        """从底层优化器获取参数的一阶矩估计（动量）。
+    def _get_first_moment(self, param: torch.Tensor) -> torch.Tensor | None:
+        """获取底层优化器的一阶矩估计 μ_t^(b)。
         
-        对于 AdamW，一阶矩为 state["m"]。
-        对于 Muon，一阶矩为 state["momentum_buffer"]。
+        论文 Algorithm 1 的 Input 明确写明 "First-moment estimates {μ_t^(b)}"，
+        即使用底层优化器已有的动量/一阶矩，不是 Magma 自己维护的。
+        
+        AdamW: state["m"] (一阶矩 EMA)
+        Muon:  state["momentum_buffer"] (动量缓冲区)
         """
         state = self.base_optimizer.state.get(param, {})
         if "m" in state:
@@ -355,66 +362,77 @@ class Magma:
     def step(self, closure=None):
         """执行 Magma 包装的优化步骤。
         
-        步骤：
-        1. 对每个参数块计算动量-梯度对齐分数
-        2. 按对齐分数和随机掩码修改梯度
-        3. 调用底层优化器的 step()
-        4. 恢复被修改的梯度（确保梯度累积等场景不受影响）
+        严格按照 Algorithm 1：
+        1. 保存所有参数的当前值快照 θ_t
+        2. 计算每个 block 的对齐分数 s 和 Bernoulli 掩码 m
+        3. 让底层优化器执行完整 step()（产生更新 Δ_t，参数变为 θ_t - Δ_t）
+        4. 对每个 block 应用调制：θ_{t+1} = θ_t - s * m * Δ_t
+           即：θ_{t+1} = θ_t + s * m * (θ_{after} - θ_t) 当 s*m != 1 时需修正
         """
-        # 收集需要处理的参数及其原始梯度
-        modified_params = []
+        # 第1步：计算每个参数块的对齐分数和掩码，保存参数快照
+        block_info = {}  # param_id -> (s, m, snapshot)
 
         for group in self.base_optimizer.param_groups:
             for param in group["params"]:
                 if param.grad is None:
                     continue
 
+                param_id = id(param)
                 grad = param.grad
-                momentum = self._get_momentum(param)
+                mu = self._get_first_moment(param)
 
-                # 第一步没有动量时跳过 Magma 掩码
-                if momentum is None:
+                # 第一步没有动量估计时，s=1（不缩放），正常更新
+                if mu is None:
+                    # 不干预，让底层优化器正常更新
                     continue
 
-                # 将 momentum 和 grad 展平计算余弦相似度
-                mu_flat = momentum.flatten().float()
+                # 计算余弦相似度: cossim(μ, g)
+                mu_flat = mu.flatten().float()
                 g_flat = grad.flatten().float()
-
-                # cossim(μ, g)
                 mu_norm = mu_flat.norm()
                 g_norm = g_flat.norm()
+
                 if mu_norm == 0 or g_norm == 0:
                     continue
 
                 cossim = torch.dot(mu_flat, g_flat) / (mu_norm * g_norm)
 
                 # 对齐分数: s̃ = sigmoid(cossim / τ)
-                alignment = torch.sigmoid(cossim / self.tau).item()
+                s_tilde = torch.sigmoid(cossim / self.tau).item()
 
-                # EMA 更新对齐分数
-                param_id = id(param)
+                # EMA 平滑: s = 0.9 * s_prev + 0.1 * s̃
                 if param_id in self._alignment_ema:
-                    s = self.ema_decay * self._alignment_ema[param_id] + (1 - self.ema_decay) * alignment
+                    s = self.ema_decay * self._alignment_ema[param_id] + (1 - self.ema_decay) * s_tilde
                 else:
-                    s = alignment
+                    s = s_tilde
                 self._alignment_ema[param_id] = s
 
-                # Bernoulli 掩码采样
-                mask = 1 if torch.rand(1).item() < self.p else 0
+                # Bernoulli 掩码: m ~ Bernoulli(p)
+                m = 1 if torch.rand(1).item() < self.p else 0
 
-                if mask == 0:
-                    # 掩码为 0：用对齐分数缩放梯度
-                    original_grad = param.grad.clone()
-                    param.grad.mul_(s)
-                    modified_params.append((param, original_grad))
-                # mask == 1: 保留原始梯度，不做任何修改
+                # s * m 的乘积决定更新量的缩放
+                scale = s * m
 
-        # 调用底层优化器
+                # 只有当 scale != 1 时才需要修正
+                if scale != 1.0:
+                    block_info[param_id] = (scale, param.data.clone())
+
+        # 第2步：让底层优化器执行完整的 step()
         loss = self.base_optimizer.step(closure)
 
-        # 恢复被修改的梯度（保证外部逻辑如梯度累积不受影响）
-        for param, original_grad in modified_params:
-            param.grad.copy_(original_grad)
+        # 第3步：对需要调制的 block 应用 Magma 修正
+        # 底层优化器已将参数更新为 θ_after = θ_t - Δ_t
+        # 论文要求: θ_{t+1} = θ_t - s * m * Δ_t
+        # 因此: θ_{t+1} = θ_t + s * m * (θ_after - θ_t)
+        #                = (1 - s*m) * θ_t + s*m * θ_after
+        for group in self.base_optimizer.param_groups:
+            for param in group["params"]:
+                param_id = id(param)
+                if param_id in block_info:
+                    scale, snapshot = block_info[param_id]
+                    # θ_{t+1} = snapshot + scale * (param.data - snapshot)
+                    # 等价于: θ_{t+1} = (1 - scale) * snapshot + scale * θ_after
+                    param.data.mul_(scale).add_(snapshot, alpha=1 - scale)
 
         return loss
 
@@ -422,14 +440,40 @@ class Magma:
         self.base_optimizer.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self):
+        # 序列化时用参数索引映射替代 id(param)
+        param_to_idx = {}
+        idx = 0
+        for group in self.base_optimizer.param_groups:
+            for param in group["params"]:
+                param_to_idx[id(param)] = idx
+                idx += 1
+
+        alignment_state = {}
+        for pid, val in self._alignment_ema.items():
+            if pid in param_to_idx:
+                alignment_state[param_to_idx[pid]] = val
+
         return {
             "base_optimizer": self.base_optimizer.state_dict(),
-            "alignment_ema": dict(self._alignment_ema),
+            "alignment_ema": alignment_state,
         }
 
     def load_state_dict(self, state_dict):
         self.base_optimizer.load_state_dict(state_dict["base_optimizer"])
-        self._alignment_ema = state_dict.get("alignment_ema", {})
+
+        # 恢复时用参数索引重建 id 映射
+        idx_to_param_id = {}
+        idx = 0
+        for group in self.base_optimizer.param_groups:
+            for param in group["params"]:
+                idx_to_param_id[idx] = id(param)
+                idx += 1
+
+        self._alignment_ema = {}
+        for str_idx, val in state_dict.get("alignment_ema", {}).items():
+            i = int(str_idx) if isinstance(str_idx, str) else str_idx
+            if i in idx_to_param_id:
+                self._alignment_ema[idx_to_param_id[i]] = val
 
     def to(self, device, dtype):
         if hasattr(self.base_optimizer, "to"):
