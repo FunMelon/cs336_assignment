@@ -41,16 +41,12 @@ use_flash_attention = True
 dtype = torch.float32
 
 # 训练超参数
-batch_size = 48         # 每个GPU的batch size
+batch_size = 64         # 每个GPU的batch size
 iteration = 50000       # 总训练步数
 saving_interval = -1    # Checkpoint保存间隔（-1=不保存中间checkpoint）
 valid_frequency = 1000  # 验证频率
 valid_batch_multiples = 8  # 验证时使用的batch数量
-accumulation_steps = 2  # 梯度累积步数
-
-# Early Stopping 超参数
-early_stopping_patience = 15  # 连续N次验证无改善则停止
-early_stopping_min_delta = 0.01  # 最小改善阈值
+accumulation_steps = 1  # 梯度累积步数
 
 # 学习率调度参数
 warmup_ratio = 0.05     # 预热阶段占总步数的比例
@@ -384,11 +380,6 @@ def train_worker(rank, world_size, config):
             print(f"Output directory: {out_dir}\n")
             pbar = tqdm.tqdm(total=total_iterations, initial=start_iteration)
         
-        # Early Stopping 状态
-        best_val_loss = float('inf')
-        patience_counter = 0
-        early_stop_flag = False
-        
         start_time = time.time()
         for iter_idx in range(start_iteration, total_iterations):
             # 获取数据
@@ -476,19 +467,6 @@ def train_worker(rank, world_size, config):
                         amp_dtype=amp_dtype,
                     )
                     
-                    # Early Stopping 检查
-                    if val_loss < best_val_loss - early_stopping_min_delta:
-                        best_val_loss = val_loss
-                        patience_counter = 0
-                        best_model_path = os.path.join(out_dir, "best_model.pth")
-                        torch.save(model.module.state_dict(), best_model_path)
-                    else:
-                        patience_counter += 1
-                        if patience_counter >= early_stopping_patience:
-                            print(f"\nEarly stopping triggered at iteration {iter_idx + 1}")
-                            print(f"  Best validation loss: {best_val_loss:.4f}")
-                            early_stop_flag = True
-                    
                     # 记录日志
                     save_log(
                         log_path,
@@ -502,14 +480,6 @@ def train_worker(rank, world_size, config):
                     
                     # 保存损失曲线图
                     plot_logs(log_path, out_dir, rank)
-            
-            # 检查是否需要 early stop
-            early_stop_tensor = torch.tensor([1 if early_stop_flag else 0], dtype=torch.int, device=device)
-            dist.broadcast(early_stop_tensor, src=0)
-            if early_stop_tensor.item() == 1:
-                if rank == 0:
-                    print("All processes stopping due to early stopping.")
-                break
             
             if rank == 0:
                 # 保存checkpoint
@@ -538,8 +508,6 @@ def train_worker(rank, world_size, config):
                 pbar.update(1)
         
         if rank == 0:
-            if early_stop_flag:
-                print(f"\nTraining ended via early stopping. Best val_loss: {best_val_loss:.4f}")
             pbar.close()
             print("\n" + "=" * 80)
             print("Training Completed!")
