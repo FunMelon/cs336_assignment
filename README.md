@@ -20,6 +20,7 @@
 - [x] 解决openweb大规模数据集在有限内存训练的问题（流式预分词）；
 - [x] 修复流式预分词的并行化问题
 - [x] 修复多线程cProfile的pickle问题
+- [x] 实现merge过程的Rust/PyO3 加速实现
 
 ### Transformer语言模型架构
 - [x] 实现线性层和嵌入层；
@@ -112,8 +113,19 @@
 
 ### 分布式数据并行训练 (DDP)
 - [x] 实现基础版 (Naïve) DDP 类
-- [x] 实现改进版DDP；
+- [x] 实现扁平化DDP；
 - [x] 实现重叠版 (Overlap) DDP；
 - [x] 实现分桶 (Bucketed) DDP；
 
 ### 优化器状态分片 (ZeRO-1)
+...
+
+### 实验一融合实验二
+- 融合flash-attention：显存占用大幅降低（43.7GB → 26.9GB），速度提升（预期8.2h → 7h）；
+- 融合DDP优化：
+    - 扁平化DDP(大幅加速9h20m → 8h50m)
+    - 分桶DDP(速度几乎无变化，设置小分桶如1MB还会拖累速度，模型参数较小)
+
+耗时3:37:50，验证集结果为3.1239（相比实验一调整了保存模型的逻辑，删除了early stop）
+
+![融合实验结果](assignment2-systems/assert/plot.png)
