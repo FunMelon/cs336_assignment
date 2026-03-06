@@ -1,4 +1,14 @@
 #!/bin/bash
+# DDP分布式训练启动脚本
+# 
+# 使用方法:
+#   ./run_ddp.sh [GPU数量] [其他参数]
+# 
+# 示例:
+#   ./run_ddp.sh 2                                    # 使用2个GPU，默认优化（default编译模式，快速）
+#   ./run_ddp.sh 4 --compile_mode reduce-overhead     # 使用4个GPU，激进优化（编译慢，运行快）
+#   ./run_ddp.sh 2 --compile_mode max-autotune        # 最大优化（编译很慢，运行最快）
+
 # 设置默认GPU数量
 NUM_GPUS=${1:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)}
 
@@ -43,14 +53,24 @@ export NCCL_P2P_DISABLE=0
 export NCCL_SHM_DISABLE=0
 export OMP_NUM_THREADS=1
 
-# 默认开启全部性能优化
+# 默认开启全部性能优化（默认使用 default 编译模式，编译快，适合debug）
 PERF_ARGS="--enable_tf32 --enable_amp --amp_dtype bfloat16 --enable_compile"
 
 # 获取额外的参数（从第二个参数开始）
 shift
 EXTRA_ARGS="$@"
 
-echo "性能优化: $PERF_ARGS"
+echo "性能优化配置:"
+echo "  - TF32: 启用"
+echo "  - AMP: 启用 (bfloat16)"
+echo "  - torch.compile: 启用"
+# 检测编译模式
+if [[ "$EXTRA_ARGS" == *"--compile_mode"* ]]; then
+    COMPILE_MODE=$(echo "$EXTRA_ARGS" | grep -oP '(?<=--compile_mode )\S+' || echo "default")
+    echo "  - compile_mode: $COMPILE_MODE"
+else
+    echo "  - compile_mode: default (快速编译，适合debug)"
+fi
 if [ -n "$EXTRA_ARGS" ]; then
     echo "额外参数: $EXTRA_ARGS"
 fi

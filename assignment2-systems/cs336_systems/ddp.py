@@ -202,18 +202,19 @@ def train_worker(rank, world_size, config):
             tie_weights=False,
         )
         
+        # 使用torch.compile优化（如果启用）- 必须在DDP包装之前！
+        if config.get('enable_compile', False):
+            compile_mode = config.get('compile_mode', 'default')
+            model = torch.compile(model, mode=compile_mode)
+            if rank == 0:
+                print(f"torch.compile enabled (mode: {compile_mode})")
+        
         # 使用DistributedDataParallel包装模型
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[rank],
             output_device=rank
         )
-        
-        # 使用torch.compile优化（如果启用）
-        if config.get('enable_compile', False):
-            model = torch.compile(model, mode="default")
-            if rank == 0:
-                print("torch.compile enabled")
         
         if rank == 0:
             print("\n" + "=" * 80)
@@ -556,6 +557,9 @@ Examples:
                        help="AMP数据类型")
     parser.add_argument("--enable_compile", action="store_true", default=enable_compile,
                        help="启用torch.compile编译优化（PyTorch 2.0+）")
+    parser.add_argument("--compile_mode", type=str, default="default",
+                       choices=["default", "reduce-overhead", "max-autotune"],
+                       help="torch.compile编译模式：default(平衡,快速编译), reduce-overhead(减少开销), max-autotune(最大优化,编译慢)")
     
     args = parser.parse_args()
     
@@ -564,6 +568,7 @@ Examples:
         'enable_amp': args.enable_amp,
         'amp_dtype': args.amp_dtype,
         'enable_compile': args.enable_compile,
+        'compile_mode': args.compile_mode,
     }
     
     # 检查是否由 torchrun 启动（环境变量 RANK 存在）
