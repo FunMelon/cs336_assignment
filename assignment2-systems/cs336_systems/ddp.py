@@ -9,11 +9,17 @@ import csv
 import matplotlib.pyplot as plt
 import pandas as pd
 import tqdm
+import argparse
 
-from cs336_basics.model import BasicsTransformerLM
-from cs336_basics.optimizer import AdamW, get_cosine_lr
-from cs336_basics.data import get_batch
-from cs336_basics.nn_utils import cross_entropy, clip_gradient
+from cs336_basics import (
+    Transformer,
+    Muon,
+    AdamW,
+    get_batch,
+    cross_entropy_loss,
+    cosine_anneal_schedule,
+    gradient_clipping,
+)
 
 
 # ==================== 训练配置 ====================
@@ -25,41 +31,55 @@ valid_dataset_path = "../../../cs336_data/id/owt-v-id/owt_valid.bin"
 # 模型超参数
 vocab_size = 32000
 context_length = 1024
-d_model = 768           # 768/12 = 64
+d_model = 768           # 768/12 = 64 (2的幂，支持Flash Attention)
 nhead = 12
 num_layers = 12
 d_ff = 2048
 rope_theta = 10000.0
-# logit_cap 和 use_flash_attention 在 BasicsTransformerLM 中不支持，忽略
+logit_cap = 30.0
+use_flash_attention = True
 dtype = torch.float32
 
 # 训练超参数
 batch_size = 48         # 每个GPU的batch size
 iteration = 50000       # 总训练步数
-saving_interval = -1    # Checkpoint保存间隔
+saving_interval = -1    # Checkpoint保存间隔（-1=不保存中间checkpoint）
 valid_frequency = 1000  # 验证频率
 valid_batch_multiples = 8  # 验证时使用的batch数量
 accumulation_steps = 2  # 梯度累积步数
 
 # Early Stopping 超参数
-early_stopping_patience = 15
-early_stopping_min_delta = 0.01
+early_stopping_patience = 15  # 连续N次验证无改善则停止
+early_stopping_min_delta = 0.01  # 最小改善阈值
 
 # 学习率调度参数
-warmup_ratio = 0.05
-lr_decay_ratio = 0.1
+warmup_ratio = 0.05     # 预热阶段占总步数的比例
+lr_decay_ratio = 0.1    # 学习率从峰值衰减到最小值的比例
 
 # 梯度裁剪参数
 max_grad_norm = 1.0
 
 # 优化器参数
+# Muon 参数 (用于 2D 权重矩阵)
+muon_lr = 0.02
+muon_momentum = 0.95
+muon_weight_decay = 0.0
+ns_steps = 5
+
+# AdamW 参数 (用于 1D 参数、Embedding 等)
 adamw_lr = 1e-3
 adamw_betas = (0.9, 0.95)
 adamw_eps = 1e-8
 adamw_weight_decay = 1e-2
 
+# 性能优化参数
+enable_tf32 = False     # TF32优化（Ampere+ GPU）
+enable_amp = False      # 混合精度训练（AMP）
+amp_dtype = 'float16'   # AMP数据类型：'float16' 或 'bfloat16'
+enable_compile = False  # torch.compile优化（需要PyTorch 2.0+）
+
 # 分布式训练参数
-world_size = torch.cuda.device_count()
+world_size = torch.cuda.device_count()  # 可用的GPU数量
 dist_url = "env://"
 
 
@@ -284,7 +304,7 @@ def evaluate_validation_loss(
             target_batch = target_batch.to(dtype=torch.int)
 
             logits = model(input_batch)
-            val_loss = cross_entropy(logits, target_batch)
+            val_loss = cross_entropy_loss(logits, target_batch)
             losses.append(val_loss.item())
     model.train()
     return sum(losses) / len(losses)
@@ -340,46 +360,86 @@ def train_worker(rank, world_size, config):
         setup_distributed(rank, world_size)
         device = f"cuda:{rank}"
         
-        # 创建模型 - 使用 BasicsTransformerLM
-        model = BasicsTransformerLM(
+        # 设置TF32（如果启用）
+        if config.get('enable_tf32', False):
+            torch.set_float32_matmul_precision('high')
+            if rank == 0:
+                print("TF32 enabled for float32 matmul")
+        
+        # 创建模型
+        model = Transformer(
             vocab_size=vocab_size,
             context_length=context_length,
             d_model=d_model,
+            nhead=nhead,
             num_layers=num_layers,
-            num_heads=nhead,
             d_ff=d_ff,
             rope_theta=rope_theta,
+            logit_cap=logit_cap,
+            use_flash_attention=use_flash_attention,
+            device=device,
+            tie_weights=False,
         )
         
-        # 使用 DDPIndividualParameters 包装模型
+        # Move model to device BEFORE wrapping with DDPIndividualParameters
+        # This ensures parameters are on GPU for NCCL broadcast/all_reduce
+        model.to(device=device, dtype=dtype)
+        
+        # 使用 DDPIndividualParameters 包装模型 (keeping existing optimization)
+        # Note: The original assignment uses DDPIndividualParameters
         model = DDPIndividualParameters(model)
+        
+        # 使用torch.compile优化（如果启用）
+        if config.get('enable_compile', False):
+            model = torch.compile(model, mode="default")
+            if rank == 0:
+                print("torch.compile enabled")
         
         if rank == 0:
             print("\n" + "=" * 80)
-            print("DDP Training with cs336 BasicsTransformerLM")
+            print("DDP Training with cs336 Transformer")
             print("=" * 80)
             num_params = sum(p.numel() for p in model.parameters())
             print(f"Model: {num_params:,} parameters ({num_params/1e6:.2f}M)")
+            if use_flash_attention:
+                print("FlashAttention enabled (using Triton kernels)")
             print(f"GPUs: {world_size} | Batch/GPU: {batch_size} | Global Batch: {batch_size * world_size}")
             print("=" * 80 + "\n")
         
-        # 优化器 - 使用 AdamW
-        # 分离权重衰减参数
-        decay_params = []
-        nodecay_params = []
+        # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
+        muon_params = []
+        adamw_decay_params = []
+        adamw_nodecay_params = []
         
+        # model is wrapped, so we iterate model.parameters() or model.module.named_parameters()
+        # model.named_parameters() on DDPIndividualParameters (which is nn.Module) will recursively find parameters
         for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if param.ndim == 1:
-                nodecay_params.append(param)
-            else:
-                decay_params.append(param)
-                
-        optimizer = AdamW(
+            if param.requires_grad:
+                if param.ndim == 2 and 'embedding' not in name.lower():
+                    muon_params.append(param)
+                elif 'embedding' in name.lower():
+                    adamw_decay_params.append(param)
+                else:
+                    adamw_nodecay_params.append(param)
+        
+        if rank == 0:
+            print(f"Optimizer Setup:")
+            print(f"  - Muon params: {len(muon_params)} tensors (2D weights)")
+            print(f"  - AdamW params (w/ decay): {len(adamw_decay_params)} tensors (embeddings)")
+            print(f"  - AdamW params (no decay): {len(adamw_nodecay_params)} tensors (bias, norm)\n")
+        
+        # 创建混合优化器
+        muon_opt = Muon(
+            muon_params,
+            lr=muon_lr,
+            momentum=muon_momentum,
+            weight_decay=muon_weight_decay,
+            ns_steps=ns_steps,
+        )
+        adamw_opt = AdamW(
             [
-                {'params': decay_params, 'weight_decay': adamw_weight_decay},
-                {'params': nodecay_params, 'weight_decay': 0.0},
+                {'params': adamw_decay_params, 'weight_decay': adamw_weight_decay},
+                {'params': adamw_nodecay_params, 'weight_decay': 0.0},
             ],
             lr=adamw_lr,
             betas=adamw_betas,
@@ -433,7 +493,8 @@ def train_worker(rank, world_size, config):
             if rank == 0:
                 checkpoint = torch.load(checkpoint_path, map_location=device)
                 model.module.load_state_dict(checkpoint["model_state_dict"])
-                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                muon_opt.load_state_dict(checkpoint["muon_optimizer_state_dict"])
+                adamw_opt.load_state_dict(checkpoint["adamw_optimizer_state_dict"])
                 start_iteration = checkpoint["iteration"]
                 print(f"Loaded checkpoint from iteration {start_iteration}\n")
             
@@ -462,19 +523,17 @@ def train_worker(rank, world_size, config):
         if rank == 0:
             print(f"Using real dataset: {train_dataset_path}")
         
-        # 将模型移动到指定设备和数据类型
-        model.to(device=device, dtype=dtype)
-        # 优化器已经在CPU上初始化，PyTorch优化器通常会自动处理设备，或者我们需要手动移动状态
-        # 这里为了简单，假设optimizer step时会处理，或者我们不移动它因为AdamW实现可能依赖param.grad所在的设备
+        # 将优化器移动到设备 (Muon needs this if it has state)
+        muon_opt.to(device=device, dtype=dtype)
+        adamw_opt.to(device=device, dtype=dtype)
         
         # 同步所有进程
         dist.barrier()
         
         # 训练循环
         model.train()
-        # AdamW from cs336_basics might not have zero_grad, checking... 
-        # checked: it inherits from torch.optim.Optimizer, so it has zero_grad
-        optimizer.zero_grad()
+        muon_opt.zero_grad()
+        adamw_opt.zero_grad()
         
         if rank == 0:
             print(f"Starting training from iteration {start_iteration} to {total_iterations}...")
@@ -499,40 +558,49 @@ def train_worker(rank, world_size, config):
             input_batch = input_batch.to(dtype=torch.int)
             target_batch = target_batch.to(dtype=torch.int)
             
-            # 计算学习率
-            lr = get_cosine_lr(
-                it=iter_idx,
-                max_learning_rate=adamw_lr,
-                min_learning_rate=adamw_lr * lr_decay_ratio,
-                warmup_iters=int(warmup_ratio * iteration),
-                cosine_cycle_iters=iteration,
+            # 计算学习率调度因子
+            lr_factor = cosine_anneal_schedule(
+                current_step=iter_idx,
+                warmup_steps=int(warmup_ratio * iteration),
+                cosine_anneal_steps=iteration,
+                max_lr=1.0,
+                min_lr=lr_decay_ratio,
             )
             
             # 更新学习率
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
+            for param_group in muon_opt.param_groups:
+                param_group["lr"] = muon_lr * lr_factor
+            for param_group in adamw_opt.param_groups:
+                param_group["lr"] = adamw_lr * lr_factor
             
             # 梯度累积优化
             is_sync_step = (iter_idx + 1) % accumulation_steps == 0
+            # DDPIndividualParameters.no_sync()
             sync_context = nullcontext() if is_sync_step else model.no_sync()
             
             with sync_context:
                 logits = model(input_batch)
-                loss = cross_entropy(logits, target_batch)
+                loss = cross_entropy_loss(logits, target_batch)
                 loss_scaled = loss / accumulation_steps
                 loss_scaled.backward()
             
             if is_sync_step:
+                # Custom DDP synchronization
                 model.finish_gradient_synchronization()
-                clip_gradient(model.parameters(), max_norm=max_grad_norm)
-                optimizer.step()
-                optimizer.zero_grad()
+                
+                gradient_clipping(model.parameters(), max_norm=max_grad_norm)
+                
+                muon_opt.step()
+                adamw_opt.step()
+                
+                muon_opt.zero_grad()
+                adamw_opt.zero_grad()
             
             # 只在rank 0进程显示进度和保存日志
             if rank == 0:
                 if iter_idx % 10 == 0:
                     pbar.set_description(
-                        f"Loss: {loss.item():.4f}, LR: {lr:.4f}"
+                        f"Loss: {loss.item():.4f}, LR: {lr_factor:.4f}"
                     )
                 
                 # 验证和日志记录
@@ -568,7 +636,7 @@ def train_worker(rank, world_size, config):
                         wallclock_time=time.time() - start_time,
                         train_loss=loss.item(),
                         val_loss=val_loss,
-                        lr=lr,
+                        lr=lr_factor,
                         rank=rank,
                     )
                     
@@ -592,7 +660,8 @@ def train_worker(rank, world_size, config):
                     torch.save(
                         {
                             "model_state_dict": model.module.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
+                            "muon_optimizer_state_dict": muon_opt.state_dict(),
+                            "adamw_optimizer_state_dict": adamw_opt.state_dict(),
                             "iteration": iter_idx,
                         },
                         checkpoint_path,
@@ -626,16 +695,31 @@ def train_worker(rank, world_size, config):
 
 def main():
     """主函数：启动分布式训练"""
-    import argparse
     
     parser = argparse.ArgumentParser(
-        description="DDP Training with cs336 BasicsTransformerLM",
+        description="DDP Training with cs336 Transformer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     
+    # 仅保留性能优化选项
+    parser.add_argument("--enable_tf32", action="store_true", default=enable_tf32,
+                       help="启用TF32加速（Ampere+ GPU）")
+    parser.add_argument("--enable_amp", action="store_true", default=enable_amp,
+                       help="启用混合精度训练（AMP）")
+    parser.add_argument("--amp_dtype", type=str, default=amp_dtype, 
+                       choices=["float16", "bfloat16"],
+                       help="AMP数据类型")
+    parser.add_argument("--enable_compile", action="store_true", default=enable_compile,
+                       help="启用torch.compile编译优化（PyTorch 2.0+）")
+    
     args = parser.parse_args()
     
-    config = {}
+    config = {
+        'enable_tf32': args.enable_tf32,
+        'enable_amp': args.enable_amp,
+        'amp_dtype': args.amp_dtype,
+        'enable_compile': args.enable_compile,
+    }
     
     # 检查是否由 torchrun 启动（环境变量 RANK 存在）
     if "RANK" in os.environ:
