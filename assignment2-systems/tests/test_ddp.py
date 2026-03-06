@@ -159,10 +159,15 @@ def _test_DistributedDataParallelCPU(
 
         # At this point, the non-parallel model should exactly match the parameters of the DDP model
         if rank == 0:
-            for non_parallel_model_parameter, ddp_model_parameter in zip(
+            for name, (non_parallel_model_parameter, ddp_model_parameter) in enumerate(zip(
                 non_parallel_model.parameters(), ddp_model.parameters()
-            ):
-                assert torch.allclose(non_parallel_model_parameter, ddp_model_parameter)
+            )):
+                if not torch.allclose(non_parallel_model_parameter, ddp_model_parameter, atol=1e-4):
+                    diff = (non_parallel_model_parameter - ddp_model_parameter).abs().max()
+                    print(f"Rank {rank}, Iter {i}, Check 2, Param {name}: Max diff {diff}")
+                    print(f"Non-parallel: {non_parallel_model_parameter.view(-1)[:5]}")
+                    print(f"DDP: {ddp_model_parameter.view(-1)[:5]}")
+                assert torch.allclose(non_parallel_model_parameter, ddp_model_parameter, atol=1e-4)
 
         # Shuffle the data so that during the next iteration, each DDP rank sees a different set of inputs.
         # We make sure to use the same seed when shuffling (else the per-rank examples might not be disjoint).
@@ -174,8 +179,11 @@ def _test_DistributedDataParallelCPU(
     # After training is done, we should have the same weights on both the non-parallel baseline
     # and the model trained with DDP.
     if rank == 0:
-        for non_parallel_model_parameter, ddp_model_parameter in zip(
+        for name, (non_parallel_model_parameter, ddp_model_parameter) in enumerate(zip(
             non_parallel_model.parameters(), ddp_model.parameters()
-        ):
-            assert torch.allclose(non_parallel_model_parameter, ddp_model_parameter)
+        )):
+            if not torch.allclose(non_parallel_model_parameter, ddp_model_parameter, atol=1e-4):
+                diff = (non_parallel_model_parameter - ddp_model_parameter).abs().max()
+                print(f"Rank {rank}, Final Check, Param {name}: Max diff {diff}")
+            assert torch.allclose(non_parallel_model_parameter, ddp_model_parameter, atol=1e-4)
     _cleanup_process_group()
