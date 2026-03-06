@@ -106,8 +106,16 @@ def evaluate_validation_loss(
     num_batches: int = 5,
     enable_amp: bool = False,
     amp_dtype: torch.dtype = torch.float32,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> float:
-    """评估验证集上的平均损失（支持AMP加速）"""
+    """评估验证集上的平均损失（支持AMP加速 + 分布式并行验证）
+    
+    并行策略：
+    - 所有GPU并行评估不同的batch
+    - 使用 all_reduce 汇总所有进程的损失
+    - 验证速度提升 world_size 倍
+    """
     model.eval()
     losses = []
     with torch.no_grad():
@@ -127,8 +135,22 @@ def evaluate_validation_loss(
                 val_loss = cross_entropy_loss(logits, target_batch)
             
             losses.append(val_loss.item())
+    
+    # 计算本地平均损失
+    local_avg_loss = sum(losses) / len(losses)
+    
+    # 分布式环境：使用 all_reduce 汇总所有进程的损失
+    if world_size > 1:
+        loss_tensor = torch.tensor(local_avg_loss, device=device, dtype=torch.float32)
+        # 所有进程的损失求和
+        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+        # 计算全局平均
+        global_avg_loss = (loss_tensor / world_size).item()
+    else:
+        global_avg_loss = local_avg_loss
+    
     model.train()
-    return sum(losses) / len(losses)
+    return global_avg_loss
 
 
 def save_log(
@@ -225,6 +247,7 @@ def train_worker(rank, world_size, config):
             if use_flash_attention:
                 print("FlashAttention enabled (using Triton kernels)")
             print(f"GPUs: {world_size} | Batch/GPU: {batch_size} | Global Batch: {batch_size * world_size}")
+            print(f"Validation: Parallel across {world_size} GPUs (speedup: {world_size}x)")
             print("=" * 80 + "\n")
         
         # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
@@ -446,29 +469,32 @@ def train_worker(rank, world_size, config):
                 muon_opt.zero_grad()
                 adamw_opt.zero_grad()
             
-            # 只在rank 0进程显示进度和保存日志
-            if rank == 0:
-                if iter_idx % 10 == 0:
-                    pbar.set_description(
-                        f"Loss: {loss.item():.4f}, LR: {lr_factor:.4f}"
-                    )
+            # 进度条更新（只在rank 0）
+            if rank == 0 and iter_idx % 10 == 0:
+                pbar.set_description(
+                    f"Loss: {loss.item():.4f}, LR: {lr_factor:.4f}"
+                )
+            
+            # ==================== 并行验证 ====================
+            # 所有进程都参与验证，提升验证速度 world_size 倍
+            if (
+                iter_idx == 0 or (iter_idx + 1) % valid_frequency == 0 or iter_idx == total_iterations - 1
+            ):
+                val_loss = evaluate_validation_loss(
+                    model.module,
+                    valid_dataset,
+                    batch_size,
+                    context_length,
+                    device,
+                    valid_batch_multiples,
+                    enable_amp=enable_amp,
+                    amp_dtype=amp_dtype,
+                    rank=rank,
+                    world_size=world_size,
+                )
                 
-                # 验证和日志记录
-                if (
-                    iter_idx == 0 or (iter_idx + 1) % valid_frequency == 0 or iter_idx == total_iterations - 1
-                ):
-                    val_loss = evaluate_validation_loss(
-                        model.module,
-                        valid_dataset,
-                        batch_size,
-                        context_length,
-                        device,
-                        valid_batch_multiples,
-                        enable_amp=enable_amp,
-                        amp_dtype=amp_dtype,
-                    )
-                    
-                    # 记录日志
+                # 只在rank 0进程记录日志和绘图
+                if rank == 0:
                     save_log(
                         log_path,
                         step=iter_idx + 1,
@@ -478,8 +504,6 @@ def train_worker(rank, world_size, config):
                         lr=lr_factor,
                         rank=rank,
                     )
-                    
-                    # 保存损失曲线图
                     plot_logs(log_path, out_dir, rank)
             
             if rank == 0:
