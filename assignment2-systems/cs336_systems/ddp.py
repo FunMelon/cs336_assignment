@@ -42,9 +42,9 @@ dtype = torch.float32
 
 # 训练超参数
 batch_size = 64         # 每个GPU的batch size
-iteration = 50000       # 总训练步数
+iteration = 20000       # 总训练步数
 saving_interval = -1    # Checkpoint保存间隔（-1=不保存中间checkpoint）
-valid_frequency = 1000  # 验证频率
+valid_frequency = 100  # 验证频率
 valid_batch_multiples = 8  # 验证时使用的batch数量
 accumulation_steps = 1  # 梯度累积步数
 
@@ -231,11 +231,40 @@ def train_worker(rank, world_size, config):
             if rank == 0:
                 print(f"torch.compile enabled (mode: {compile_mode})")
         
-        # 使用DistributedDataParallel包装模型
+        # 使用DistributedDataParallel包装模型（手动控制通信优化）
+        # DDP优化模式：
+        #   0: 无优化（朴素DDP，每参数单独通信）
+        #   1: 只扁平化（避免分桶overhead）
+        #   2: 分桶（启用计算通信重叠）
+        
+        ddp_mode = config.get('ddp_mode', 1)
+        
+        if ddp_mode == 0:
+            # 模式0：无优化（朴素DDP）
+            bucket_size = 1  # 最小桶 = 几乎每个参数单独通信
+            use_bucket_view = False
+            optimization_level = "naive (no optimization)"
+            
+        elif ddp_mode == 1:
+            # 模式1：只用优化一（扁平化）
+            bucket_size = 25000  # 超大桶 = 不分桶 = 只扁平化
+            use_bucket_view = False
+            optimization_level = "flatten-only (default)"
+            
+        else:  # ddp_mode == 2
+            # 模式2：优化一+二+三（分桶）
+            bucket_size = 25
+            use_bucket_view = True
+            optimization_level = "bucketing+overlap"
+        
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[rank],
-            output_device=rank
+            output_device=rank,
+            bucket_cap_mb=bucket_size,
+            gradient_as_bucket_view=use_bucket_view,
+            broadcast_buffers=False,  # Transformer不需要同步buffer（无BatchNorm）
+            static_graph=config.get('enable_compile', False),  # torch.compile时启用
         )
         
         if rank == 0:
@@ -248,6 +277,24 @@ def train_worker(rank, world_size, config):
                 print("FlashAttention enabled (using Triton kernels)")
             print(f"GPUs: {world_size} | Batch/GPU: {batch_size} | Global Batch: {batch_size * world_size}")
             print(f"Validation: Parallel across {world_size} GPUs (speedup: {world_size}x)")
+            
+            print(f"\nDDP Communication Strategy: Mode {ddp_mode} - {optimization_level}")
+            print(f"  - Bucket Size: {bucket_size}MB")
+            print(f"  - Zero-Copy Gradients: {'Enabled' if use_bucket_view else 'Disabled'}")
+            print(f"  - Broadcast Buffers: Disabled (no BatchNorm)")
+            
+            if ddp_mode == 0:
+                print(f"\n  ⚠️  Mode 0: 朴素DDP（无优化）")
+                print(f"     - 每个参数单独通信")
+            elif ddp_mode == 1:
+                print(f"\n  ✅ Mode 1: 只扁平化（推荐2-3卡）")
+                print(f"     - 所有梯度拼接后一次通信")
+                print(f"     - 避免分桶和重叠的overhead")
+            else:  # ddp_mode == 2
+                print(f"\n  ✅ Mode 2: 标准分桶（推荐4-7卡）")
+                print(f"     - 梯度分桶")
+                print(f"     - 计算与通信重叠")
+            
             print("=" * 80 + "\n")
         
         # 分离参数：2D 权重矩阵用 Muon，其他参数用 AdamW
@@ -384,7 +431,7 @@ def train_worker(rank, world_size, config):
         )
         total_iterations = iteration
         if rank == 0:
-            print(f"Using real dataset: {train_dataset_path}")
+            print(f"Using dataset: {train_dataset_path}")
         
         # 将模型移动到指定设备和数据类型
         model.to(device=device, dtype=dtype)
@@ -584,6 +631,9 @@ Examples:
     parser.add_argument("--compile_mode", type=str, default="default",
                        choices=["default", "reduce-overhead", "max-autotune"],
                        help="torch.compile编译模式：default(平衡,快速编译), reduce-overhead(减少开销), max-autotune(最大优化,编译慢)")
+    parser.add_argument("--ddp_mode", type=int, default=1,
+                       choices=[0, 1, 2],
+                       help="DDP通信优化模式：0(无优化), 1(只扁平化,默认), 2(标准分桶)")
     
     args = parser.parse_args()
     
@@ -593,6 +643,7 @@ Examples:
         'amp_dtype': args.amp_dtype,
         'enable_compile': args.enable_compile,
         'compile_mode': args.compile_mode,
+        'ddp_mode': args.ddp_mode,
     }
     
     # 检查是否由 torchrun 启动（环境变量 RANK 存在）

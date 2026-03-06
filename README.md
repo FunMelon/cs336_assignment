@@ -111,9 +111,9 @@
 - [ ] 用 Triton 实现反向传播内核；
 
 ### 分布式数据并行训练 (DDP)
-- [ ] 实现基础版 (Naïve) DDP 类
-- [ ] 实现改进版DDP；
-- [ ] 实现重叠版 (Overlap) DDP；
-- [ ] 实现分桶 (Bucketed) DDP；
+- [x] 实现基础版 (Naïve) DDP 类
+- [x] 实现改进版DDP；
+- [x] 实现重叠版 (Overlap) DDP；
+- [x] 实现分桶 (Bucketed) DDP；
 
 ### 优化器状态分片 (ZeRO-1)
