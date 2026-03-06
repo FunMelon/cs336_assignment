@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from contextlib import nullcontext
+from torch.amp import autocast, GradScaler
 import time
 import csv
 import matplotlib.pyplot as plt
@@ -107,8 +108,10 @@ def evaluate_validation_loss(
     context_length: int,
     device: str,
     num_batches: int = 5,
+    enable_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float32,
 ) -> float:
-    """评估验证集上的平均损失"""
+    """评估验证集上的平均损失（支持AMP加速）"""
     model.eval()
     losses = []
     with torch.no_grad():
@@ -122,8 +125,11 @@ def evaluate_validation_loss(
             input_batch = input_batch.to(dtype=torch.int)
             target_batch = target_batch.to(dtype=torch.int)
 
-            logits = model(input_batch)
-            val_loss = cross_entropy_loss(logits, target_batch)
+            # 使用AMP加速验证（不需要GradScaler，因为没有反向传播）
+            with autocast('cuda', dtype=amp_dtype, enabled=enable_amp):
+                logits = model(input_batch)
+                val_loss = cross_entropy_loss(logits, target_batch)
+            
             losses.append(val_loss.item())
     model.train()
     return sum(losses) / len(losses)
@@ -262,6 +268,21 @@ def train_worker(rank, world_size, config):
             eps=adamw_eps,
         )
         
+        # ==================== AMP设置 ====================
+        enable_amp = config.get('enable_amp', False)
+        amp_dtype_str = config.get('amp_dtype', 'bfloat16')
+        amp_dtype = torch.bfloat16 if amp_dtype_str == 'bfloat16' else torch.float16
+        
+        # GradScaler只在float16时需要（bfloat16不需要缩放）
+        use_scaler = enable_amp and amp_dtype_str == 'float16'
+        scaler = GradScaler('cuda', enabled=use_scaler)
+        
+        if rank == 0 and enable_amp:
+            print(f"AMP Configuration:")
+            print(f"  - Mixed Precision: Enabled")
+            print(f"  - AMP dtype: {amp_dtype_str}")
+            print(f"  - GradScaler: {'Enabled' if use_scaler else 'Disabled (not needed for bfloat16)'}\n")
+        
         # 创建输出目录（只在rank 0进程）
         if rank == 0:
             os.makedirs(output_path, exist_ok=True)
@@ -312,7 +333,13 @@ def train_worker(rank, world_size, config):
                 muon_opt.load_state_dict(checkpoint["muon_optimizer_state_dict"])
                 adamw_opt.load_state_dict(checkpoint["adamw_optimizer_state_dict"])
                 start_iteration = checkpoint["iteration"]
-                print(f"Loaded checkpoint from iteration {start_iteration}\n")
+                
+                # 如果checkpoint中有scaler状态且当前使用scaler，则加载
+                if use_scaler and "scaler_state_dict" in checkpoint:
+                    scaler.load_state_dict(checkpoint["scaler_state_dict"])
+                    print(f"Loaded checkpoint (with scaler) from iteration {start_iteration}\n")
+                else:
+                    print(f"Loaded checkpoint from iteration {start_iteration}\n")
             
             start_iteration_tensor = torch.tensor([start_iteration], dtype=torch.long, device=device)
             dist.broadcast(start_iteration_tensor, src=0)
@@ -395,15 +422,35 @@ def train_worker(rank, world_size, config):
             sync_context = nullcontext() if is_sync_step else model.no_sync()
             
             with sync_context:
-                logits = model(input_batch)
-                loss = cross_entropy_loss(logits, target_batch)
-                loss_scaled = loss / accumulation_steps
-                loss_scaled.backward()
+                # AMP autocast：自动选择精度（前向传播）
+                with autocast('cuda', dtype=amp_dtype, enabled=enable_amp):
+                    logits = model(input_batch)
+                    loss = cross_entropy_loss(logits, target_batch)
+                    loss_scaled = loss / accumulation_steps
+                
+                # 反向传播（使用scaler处理float16的梯度缩放）
+                if use_scaler:
+                    scaler.scale(loss_scaled).backward()
+                else:
+                    loss_scaled.backward()
             
             if is_sync_step:
+                # 梯度裁剪（需要先unscale以获取真实梯度）
+                if use_scaler:
+                    scaler.unscale_(muon_opt)
+                    scaler.unscale_(adamw_opt)
+                
                 gradient_clipping(model.parameters(), max_norm=max_grad_norm)
-                muon_opt.step()
-                adamw_opt.step()
+                
+                # 优化器更新（使用scaler.step确保梯度有效）
+                if use_scaler:
+                    scaler.step(muon_opt)
+                    scaler.step(adamw_opt)
+                    scaler.update()
+                else:
+                    muon_opt.step()
+                    adamw_opt.step()
+                
                 muon_opt.zero_grad()
                 adamw_opt.zero_grad()
             
@@ -425,6 +472,8 @@ def train_worker(rank, world_size, config):
                         context_length,
                         device,
                         valid_batch_multiples,
+                        enable_amp=enable_amp,
+                        amp_dtype=amp_dtype,
                     )
                     
                     # Early Stopping 检查
@@ -468,15 +517,17 @@ def train_worker(rank, world_size, config):
                     (iter_idx + 1) % saving_interval == 0 or iter_idx == total_iterations - 1
                 )
                 if should_save_checkpoint:
-                    torch.save(
-                        {
-                            "model_state_dict": model.module.state_dict(),
-                            "muon_optimizer_state_dict": muon_opt.state_dict(),
-                            "adamw_optimizer_state_dict": adamw_opt.state_dict(),
-                            "iteration": iter_idx,
-                        },
-                        checkpoint_path,
-                    )
+                    checkpoint_dict = {
+                        "model_state_dict": model.module.state_dict(),
+                        "muon_optimizer_state_dict": muon_opt.state_dict(),
+                        "adamw_optimizer_state_dict": adamw_opt.state_dict(),
+                        "iteration": iter_idx,
+                    }
+                    # 如果使用scaler，也保存scaler状态
+                    if use_scaler:
+                        checkpoint_dict["scaler_state_dict"] = scaler.state_dict()
+                    
+                    torch.save(checkpoint_dict, checkpoint_path)
                 
                 # 最后一次迭代时，单独保存模型文件
                 if iter_idx == total_iterations - 1:
