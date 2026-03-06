@@ -33,7 +33,11 @@ model = Transformer(
     device=device,
     tie_weights=False,
 )
-model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+
+# 加载权重并处理 torch.compile 产生的 _orig_mod. 前缀
+state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
+state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+model.load_state_dict(state_dict)
 model.to(device=device, dtype=dtype)
 model.eval()
 
