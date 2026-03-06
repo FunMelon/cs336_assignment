@@ -4,12 +4,13 @@ try:
 
     from .flash_attention_pytorch import FlashAttention as FlashAttentionPyTorch
     from .flash_attention import FlashAttentionTriton as FlashAttention
-
+    from .ddp import DDPIndividualParameters
 
     __version__ = version("cs336-systems")
     __all__ = [
         "FlashAttentionPyTorch",
         "FlashAttention",
+        "DDPIndividualParameters",
     ]
 
 except Exception:
