@@ -6,7 +6,7 @@ import json
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import heapq
-from tqdm import tqdm
+from typing import Any
 import time
 
 
@@ -47,12 +47,12 @@ def _merge_pair_in_seq(
     return tuple(merged)
 
 
-def _bpe_merge_cached(
+def _bpe_merge_cached_py(
     pre_token2freq: dict[tuple[bytes, ...], int],
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
     vocab_size: int,
-    pbar: tqdm | None = None,
+    pbar: Any | None = None,
 ) -> None:
     """缓存 + 增量更新版 BPE merge，可选 tqdm 进度条。"""
 
@@ -140,6 +140,47 @@ def _bpe_merge_cached(
 
             for pair in set(old_counts.keys()) | set(new_counts.keys()):
                 push_pair(pair)
+
+
+def _bpe_merge_cached(
+    pre_token2freq: dict[tuple[bytes, ...], int],
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+    vocab_size: int,
+    pbar: Any | None = None,
+) -> None:
+    """优先走 Rust（若可用），否则回退 Python。
+
+    Rust 分支不支持 tqdm 进度条；如果启用 pbar，将强制走 Python。
+    """
+
+    if pbar is None:
+        rust_result = None
+        try:
+            try:
+                from .rust_accel import bpe_merge_cached_rust
+            except Exception:
+                # 允许以脚本方式运行：`python streaming_bpe_trainer.py`
+                from rust_accel import bpe_merge_cached_rust  # type: ignore
+
+            rust_result = bpe_merge_cached_rust(pre_token2freq, vocab, vocab_size)
+        except Exception:
+            rust_result = None
+
+        if rust_result is not None:
+            print("[cs336_basics.bpe.streaming] merge backend: rust", flush=True)
+            vocab_out, merges_out = rust_result
+            vocab.clear()
+            vocab.update(vocab_out)
+            merges.clear()
+            merges.extend(merges_out)
+            return
+
+        print("[cs336_basics.bpe.streaming] merge backend: python", flush=True)
+    else:
+        print("[cs336_basics.bpe.streaming] merge backend: python (tqdm enabled)", flush=True)
+
+    _bpe_merge_cached_py(pre_token2freq, vocab, merges, vocab_size, pbar)
 
 def bytes_to_unicode():
     """
@@ -354,8 +395,12 @@ def bpe_streaming(
         f"Finished preprocessing {chunk_count} chunks, total time cost: {pretokenize_end_time - pretokenize_start_time:.2f} seconds"
     )
     # 迭代合并字节对（缓存 + 增量更新版）
-    with tqdm(total=vocab_size - len(vocab), desc="BPE merging") as pbar:
-        _bpe_merge_cached(pre_token2freq, vocab, merges, vocab_size, pbar=pbar)
+    merge_start_time = time.time()
+    _bpe_merge_cached(pre_token2freq, vocab, merges, vocab_size, pbar=None)
+    merge_end_time = time.time()
+    print(
+        f"Finished BPE merging, total time cost: {merge_end_time - merge_start_time:.2f} seconds"
+    )
 
     return vocab, merges
 

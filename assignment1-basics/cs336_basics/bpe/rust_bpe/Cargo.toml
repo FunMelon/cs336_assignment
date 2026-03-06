@@ -1,0 +1,11 @@
+[package]
+name = "rust_bpe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "_bpe_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }

@@ -4,12 +4,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from cs336_basics.bpe import bpe_trainer
+from cs336_basics.bpe import streaming_bpe_trainer
 
 
 def _default_input_path() -> Path:
     here = Path(__file__).resolve().parent
-    return here / "../../data/TinyStoriesV2-GPT4-train.txt"
+    return here / "../../data/owt_train.txt"
 
 
 def main() -> None:
@@ -35,10 +35,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    vocab, merges = bpe_trainer.bpe(
+    vocab, merges = streaming_bpe_trainer.bpe_streaming(
         input_path=str(args.input),
         vocab_size=args.vocab_size,
         special_tokens=list(args.special_token),
+        chunk_size_mb=256,
     )
 
     # Small sanity output so it's obvious it ran.
