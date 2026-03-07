@@ -11,6 +11,8 @@
 - `assignment1-basics/plot_loss.py`: 绘图脚本；
 - `assignment1-basics/inference.py`: 推理对话脚本；
 - `assignment1-basics/LR_range_test.py`: 学习率查找脚本；
+- `assignment1-basics/val.py`: 验证脚本；
+- `assignment1-basics/cs336_basics/bpe/rust_accel.py`: Rust加速模块；
 
 ### BPE编码器
 - [x] 实现bpe编码器的训练逻辑；
@@ -93,10 +95,17 @@
 
 ## A2 底层算子优化
 - `assignment2-systems/cs336_systems/benchmarking_script.py`: 基准测试脚本；
-- `assignment2-systems/cs336_systems/pytorch_attention`: 测试原生注意力机制的脚本；
-- `assignment2-systems/cs336_systems/flash_attention_pytorch`: FlashAttention的PyTorch实现（其中的反向传播逻辑被Triton脚本服用）；
-- `assignment2-systems/cs336_systems/flash_attention`: FlashAttention的Triton实现；
-- `assignment2-systems/cs336_systems/flash_attention_benchmark`: FlashAttention的基准测试脚本；
+- `assignment2-systems/cs336_systems/pytorch_attention.py`: 测试原生注意力机制的脚本；
+- `assignment2-systems/cs336_systems/flash_attention_pytorch.py`: FlashAttention的PyTorch实现（其中的反向传播逻辑被Triton脚本服用）；
+- `assignment2-systems/cs336_systems/flash_attention.py`: FlashAttention的Triton实现；
+- `assignment2-systems/cs336_systems/flash_benchmarking.py`: FlashAttention的基准测试脚本；
+- `assignment2-systems/cs336_systems/ddp.py`: DDP实现（包含扁平化和重叠版本）；
+- `assignment2-systems/cs336_systems/naive_ddp.py`: 基础版DDP实现；
+- `assignment2-systems/cs336_systems/distributed_demo.py`: 分布式训练演示脚本；
+- `assignment2-systems/cs336_systems/distributed_communication_single_node.py`: 单节点分布式通信测试脚本；
+- `assignment2-systems/cs336_systems/triton_demo.py`: Triton内核演示脚本；
+- `assignment2-systems/cs336_systems/run_ddp.sh`: DDP训练启动脚本；
+
 
 
 ### 性能分析与基准测试
@@ -129,3 +138,7 @@
 耗时3:37:50，验证集结果为3.1239（相比实验一调整了保存模型的逻辑，删除了early stop）
 
 ![融合实验结果](assignment2-systems/assert/plot.png)
+
+# A5 后训练和对齐
+- `assignment5-alignment/cs336_alignment/drgrpo_grader.py`: DRGRPO评分器；
+- `assignment5-alignment/cs336_alignment/vllm_demo.py`: vllm 使用示例；
