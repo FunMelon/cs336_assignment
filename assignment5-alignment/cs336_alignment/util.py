@@ -1,7 +1,7 @@
 import torch
+import torch.nn.functional as F
 
-
-def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer): 
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer) -> dict[str, torch.Tensor]: 
     """
     对提示和输出字符串进行分词，并构建一个掩码：响应token位置为1，其他token（提示或填充）位置为0。
     
@@ -68,3 +68,30 @@ def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
         'labels': torch.tensor(labels_list, dtype=torch.long),
         'response_mask': torch.tensor(response_mask_list, dtype=torch.long),
     }
+
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    计算下一个预测 token 的信息熵（即在整个词表维度上的概率分布的熵）。
+    
+    参数:
+        logits: torch.Tensor 
+            形状为 (batch_size, sequence_length, vocab_size) 的张量，包含模型输出的未归一化得分 (logits)。
+            
+    返回:
+        torch.Tensor 
+            形状为 (batch_size, sequence_length)。返回每个位置上预测下一个 token 的信息熵。
+    """
+    # 1. 使用 F.log_softmax 计算对数概率 log(p)。
+    # 强烈建议不要直接先算 softmax 再算 torch.log，因为当概率极小(接近0)时，
+    # torch.log 会出现 -inf 或 NaN。F.log_softmax 底层使用了 logsumexp，具有极佳的数值稳定性。
+    log_probs = F.log_softmax(logits, dim=-1)
+    
+    # 2. 通过指数函数还原出概率分布 p
+    probs = torch.exp(log_probs)
+    
+    # 3. 计算信息熵公式: H(p) = -sum(p * log(p))
+    # 我们需要在词表维度 (dim=-1) 上将所有的 token 概率进行求和，从而将维度降维。
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    
+    return entropy

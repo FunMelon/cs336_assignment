@@ -149,6 +149,7 @@
 - [x] 完成了使用vllm推理脚本；
 - [x] 完成了评估脚本；
 - [x] 实现了tokenize prompt并应用掩码；
+- [x] 实现计算预测熵的功能；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward | reward |
