@@ -202,3 +202,43 @@ def masked_normalize(
     normalized_val = sum_val / normalize_constant
     
     return normalized_val
+
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    在一个微批次 (microbatch) 上执行前向损失计算与反向传播。
+    """
+    
+    # 1. 计算每个 Token 的负对数似然损失
+    per_token_loss = -policy_log_probs
+    
+    # 2. 掩码与归一化
+    # 不能直接把整个 batch 糊在一起求 sum。每个 sample 长度不一样，要分别求。
+    # 我们使用 dim=1（序列维度）来求和，这样会返回一个形状为 (batch_size,) 的张量，
+    # 代表每个样本各自的归一化损失。
+    per_example_loss = masked_normalize(
+        tensor=per_token_loss,
+        mask=response_mask,
+        normalize_constant=normalize_constant,
+        dim=1
+    )
+    
+    # 然后再对整个批次求平均值 (mean)，这会自动除以 batch_size
+    normalized_loss = per_example_loss.mean()
+    
+    # 3. 梯度累加缩放
+    scaled_loss = normalized_loss / gradient_accumulation_steps
+    
+    # 4. 执行反向传播
+    scaled_loss.backward()
+    
+    # 5. 组装日志元数据
+    metadata = {
+        "unscaled_loss": normalized_loss.detach(),
+    }
+    
+    return scaled_loss, metadata

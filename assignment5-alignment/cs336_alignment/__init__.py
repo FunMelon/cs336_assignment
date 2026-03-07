@@ -6,6 +6,7 @@ try:
         compute_entropy,
         get_response_log_probs,
         masked_normalize,
+        sft_microbatch_train_step,
     )
 
     __version__ = version("cs336-alignment")
@@ -14,6 +15,7 @@ try:
         "compute_entropy",
         "get_response_log_probs",
         "masked_normalize",
+        "sft_microbatch_train_step",
     ]
 
 except Exception:

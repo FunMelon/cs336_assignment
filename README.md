@@ -152,6 +152,7 @@
 - [x] 实现计算预测熵的功能；
 - [x] 实现计算response log prob的功能；
 - [x] 实现masked normalize的功能；
+- [x] 实现了sft_microbatch_train_step的功能；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward | reward |
