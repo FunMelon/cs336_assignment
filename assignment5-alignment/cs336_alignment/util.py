@@ -158,3 +158,47 @@ def get_response_log_probs(
         result["token_entropy"] = compute_entropy(logits)
         
     return result
+
+import torch
+
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """
+    对张量进行掩码求和，并除以指定的常数进行归一化。
+    
+    参数:
+        tensor: torch.Tensor 
+            需要被求和和归一化的张量（通常是 per-token 的交叉熵损失或奖励值）。
+        mask: torch.Tensor 
+            与 tensor 形状完全相同的掩码；值为 1 的位置参与求和，值为 0 的位置被丢弃。
+        normalize_constant: float 
+            归一化常数，求和后需除以该值（比如有效 token 的总数，或批次大小）。
+        dim: int | None 
+            在归一化之前沿哪个维度进行求和。如果为 None，则将张量展平对所有元素求和。
+            
+    返回:
+        torch.Tensor 
+            归一化后的结果。被掩码遮蔽的元素（mask == 0）对总和的贡献严格为 0。
+    """
+    # 1. 对齐数据类型：掩码通常是 int 或 bool 类型，而 tensor（如 loss）是 float 或 bfloat16。
+    # 必须先将 mask 转换成与 tensor 一致的数据类型，否则相乘时 PyTorch 会报错。
+    mask_float = mask.to(tensor.dtype)
+    
+    # 2. 应用掩码 (Masking)：通过逐元素相乘 (Element-wise multiplication)，
+    # 将 mask 为 0 的位置强制置为 0，有效位置的值保持不变。
+    masked_tensor = tensor * mask_float
+    
+    # 3. 沿指定维度求和 (Summation)
+    if dim is None:
+        sum_val = masked_tensor.sum()
+    else:
+        sum_val = masked_tensor.sum(dim=dim)
+        
+    # 4. 归一化 (Normalization)：除以指定的常数
+    normalized_val = sum_val / normalize_constant
+    
+    return normalized_val

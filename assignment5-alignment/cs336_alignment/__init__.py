@@ -5,6 +5,7 @@ try:
         tokenize_prompt_and_output,
         compute_entropy,
         get_response_log_probs,
+        masked_normalize,
     )
 
     __version__ = version("cs336-alignment")
@@ -12,6 +13,7 @@ try:
         "tokenize_prompt_and_output",
         "compute_entropy",
         "get_response_log_probs",
+        "masked_normalize",
     ]
 
 except Exception:
