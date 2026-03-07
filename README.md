@@ -84,7 +84,7 @@
 ![消融实验结果](assignment1-basics/assert/ablation.png)
 
 | 优化技巧 | 测试集损失(val loss) | 变化 |
-|---------|---------------------|------|
+|---|---|---|
 | Baseline | 3.1692 | - |
 | + Norm AdamW decay | 3.1751 | -0.0059 |
 | - Logit Softcapping | 3.1833 | -0.0141 |
@@ -142,3 +142,14 @@
 # A5 后训练和对齐
 - `assignment5-alignment/cs336_alignment/drgrpo_grader.py`: DRGRPO评分器；
 - `assignment5-alignment/cs336_alignment/vllm_demo.py`: vllm 使用示例；
+- `assignment5-alignment/cs336_alignment/pre_threat.py`: 预处理数据并提取label脚本；
+- `assignment5-alignment/cs336_alignment/inference.py`: vll 推理脚本；
+- `assignment5-alignment/cs336_alignment/evaluate.py`: 评估脚本；
+
+- [x] 完成了使用vllm推理脚本；
+- [x] 完成了评估脚本；
+
+## 在GSM8K上的实验结果
+| 模型 | format_reward | answer_reward | reward |
+|---|---|---|---|
+| base模型| 0.7870 | 0.2032 | 0.2032 |
