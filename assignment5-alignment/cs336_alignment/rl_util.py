@@ -100,3 +100,82 @@ def compute_naive_policy_gradient_loss(
     """
 
     return -raw_rewards_or_advantages * policy_log_probs
+
+def compute_grpo_clip_loss(
+    advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    计算 GRPO 剪辑损失函数 (Clipped Loss)。
+
+    GRPO 使用与 PPO 相同的裁剪目标函数，旨在限制策略更新的幅度，防止因单次更新变化过大而导致训练不稳定。
+
+    核心公式:
+        L(θ) = -min(r(θ) * A, clip(r(θ), 1-ε, 1+ε) * A)
+
+    其中:
+        r(θ) = π_θ(a|s) / π_θ_old(a|s) = exp(log_prob - old_log_prob)
+        A 是优势值 (advantage)
+        ε 是 cliprange (裁剪范围，如 0.2)
+
+    当 A > 0 (正向优势) 时: 限制 r(θ) ≤ 1+ε，防止过度增加概率
+    当 A < 0 (负向优势) 时: 限制 r(θ) ≥ 1-ε，防止过度减少概率
+
+    Args:
+        advantages: torch.Tensor Shape (batch_size, 1) 或 (batch_size,)，每个样本的优势值 A。
+        policy_log_probs: torch.Tensor Shape (batch_size, sequence_length)，当前策略的每个 token 的对数概率。
+        old_log_probs: torch.Tensor Shape (batch_size, sequence_length)，旧策略的每个 token 的对数概率。
+        cliprange: float 裁剪参数 ε (例如 0.2)。
+
+    Returns:
+        tuple[torch.Tensor, dict[str, torch.Tensor]]:
+            loss: Shape (batch_size, sequence_length)，每个 token 的裁剪后的损失值。
+            metadata: 包含日志信息的字典，建议记录每个 token 是否被裁剪。
+    """
+    # 1. 计算概率比率 r(θ) = π_θ(a|s) / π_θ_old(a|s) = exp(log_prob - old_log_prob)
+    # 使用 exp 计算比率，比直接相除更数值稳定
+    log_ratio = policy_log_probs - old_log_probs
+    ratio = torch.exp(log_ratio)
+
+    # 2. 确保 advantages 的形状与 ratio 匹配，以便进行逐元素运算
+    # 如果 advantages 是一维的 (batch_size,)，则扩展为 (batch_size, 1)
+    if advantages.dim() == 1:
+        advantages = advantages.unsqueeze(-1)
+
+    # 3. 计算裁剪后的比率: clip(r(θ), 1-ε, 1+ε)
+    # 当 A > 0 时: 裁剪上限为 1+ε，防止过度增加概率
+    # 当 A < 0 时: 裁剪下限为 1-ε，防止过度减少概率
+    clipped_ratio = torch.clamp(ratio, 1 - cliprange, 1 + cliprange)
+
+    # 4. 计算 PPO/GRPO 核心损失公式: L = -min(r*A, clip(r)*A)
+    # 注意: 必须先计算 min(r*A, clip(r)*A)，再取负号
+    # 如果先取负号再取 min，当 A < 0 时结果会错误！
+    # 原因: min(-x, -y) = -max(x, y) ≠ -min(x, y)
+    loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+
+    # 5. 计算裁剪统计信息用于日志记录
+    # 当 ratio 被裁剪且裁剪后的损失更小时，认为发生了裁剪
+    # 检查每个 token 是否被裁剪 (裁剪后的损失是否被选中)
+    was_clipped = (ratio * advantages != clipped_ratio * advantages).float()
+
+    # 计算裁剪率 (被裁剪的 token 占比)
+    clip_fraction = was_clipped.mean().item()
+
+    # 计算原始损失和裁剪后损失用于日志记录
+    original_loss = -ratio * advantages
+    clipped_loss = -clipped_ratio * advantages
+
+    metadata = {
+        "loss/clip_fraction": clip_fraction,
+        "loss/mean": loss.mean().item(),
+        "loss/mean_original": original_loss.mean().item(),
+        "loss/mean_clipped": clipped_loss.mean().item(),
+        "ratio/mean": ratio.mean().item(),
+        "ratio/std": ratio.std().item(),
+        "ratio/min": ratio.min().item(),
+        "ratio/max": ratio.max().item(),
+    }
+
+    return loss, metadata

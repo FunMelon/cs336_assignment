@@ -12,6 +12,7 @@ try:
     from .rl_util import (
         compute_group_normalized_rewards,
         compute_naive_policy_gradient_loss,
+        compute_grpo_clip_loss,
     )
 
     __version__ = version("cs336-alignment")
@@ -23,6 +24,7 @@ try:
         "sft_microbatch_train_step",
         "compute_group_normalized_rewards",
         "compute_naive_policy_gradient_loss",
+        "compute_grpo_clip_loss",
     ]
 
 except Exception:
