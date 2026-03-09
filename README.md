@@ -167,6 +167,7 @@
 - [x] 实现clip loss;
 - [x] 实现策略梯度包装起；
 - [x] 实现mask mean；
+- [x] 实现GRPO微批次梯度更新；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward |

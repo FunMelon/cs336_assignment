@@ -264,3 +264,71 @@ def masked_mean(
     mean = masked_tensor.sum(dim=dim) / count
 
     return mean
+
+
+def grpo_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+    raw_rewards: torch.Tensor | None = None,
+    advantages: torch.Tensor | None = None,
+    old_log_probs: torch.Tensor | None = None,
+    cliprange: float | None = None,
+    normalize_constant: float | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    在一个微批次上计算策略梯度损失并执行反向传播。
+
+    参数:
+        policy_log_probs: torch.Tensor 形状为 (batch_size, sequence_length)，策略的每个 token 的对数概率。
+        response_mask: torch.Tensor 形状为 (batch_size, sequence_length)，响应的掩码。
+        gradient_accumulation_steps: int，梯度累加的步数。
+        loss_type: str，损失函数类型，取值为 "no_baseline"、"reinforce_with_baseline" 或 "grpo_clip"。
+        raw_rewards: torch.Tensor | None，原始奖励，当 loss_type="no_baseline" 时需要。
+        advantages: torch.Tensor | None，优势值，当 loss_type 为 "reinforce_with_baseline" 或 "grpo_clip" 时需要。
+        old_log_probs: torch.Tensor | None，旧策略的对数概率，当 loss_type="grpo_clip" 时需要。
+        cliprange: float | None，裁剪范围，当 loss_type="grpo_clip" 时需要。
+        normalize_constant: float | None，归一化常数，如果提供则在序列维度上求和并用此常数归一化（如 Dr. GRPO 的做法）。
+
+    返回:
+        tuple[torch.Tensor, dict[str, torch.Tensor]]:
+            缩放后的损失和元数据。
+    """
+    # 1. 计算每个 token 的策略梯度损失
+    loss, metadata = compute_policy_gradient_loss(
+        policy_log_probs=policy_log_probs,
+        loss_type=loss_type,
+        raw_rewards=raw_rewards,
+        advantages=advantages,
+        old_log_probs=old_log_probs,
+        cliprange=cliprange,
+    )
+
+    # 2. 应用响应掩码并计算每个样本的损失
+    # 使用 masked_mean 计算每个样本的平均损失
+    per_example_loss = masked_mean(loss, response_mask, dim=1)
+
+    # 3. 如果提供了 normalize_constant，则使用 Dr. GRPO 的做法
+    # 即在序列维度上求和后除以 normalize_constant
+    if normalize_constant is not None:
+        # 先求和再归一化 (Dr. GRPO 风格)
+        summed_loss = masked_mean(loss, response_mask, dim=1).sum() / normalize_constant
+        normalized_loss = summed_loss
+    else:
+        # 标准做法：对每个样本求均值后再在批次上求均值
+        normalized_loss = per_example_loss.mean()
+
+    # 4. 梯度累加缩放
+    scaled_loss = normalized_loss / gradient_accumulation_steps
+
+    # 5. 执行反向传播
+    scaled_loss.backward()
+
+    # 6. 组装日志元数据
+    metadata.update({
+        "unscaled_loss": normalized_loss.detach(),
+        "scaled_loss": scaled_loss.detach(),
+    })
+
+    return scaled_loss, metadata

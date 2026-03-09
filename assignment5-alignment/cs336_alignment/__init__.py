@@ -15,6 +15,7 @@ try:
         compute_grpo_clip_loss,
         compute_policy_gradient_loss,
         masked_mean,
+        grpo_microbatch_train_step,
     )
 
     __version__ = version("cs336-alignment")
@@ -29,6 +30,7 @@ try:
         "compute_grpo_clip_loss",
         "compute_policy_gradient_loss",
         "masked_mean",
+        "grpo_microbatch_train_step",
     ]
 
 except Exception:
