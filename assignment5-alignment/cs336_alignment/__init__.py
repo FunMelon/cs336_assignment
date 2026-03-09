@@ -14,6 +14,7 @@ try:
         compute_naive_policy_gradient_loss,
         compute_grpo_clip_loss,
         compute_policy_gradient_loss,
+        masked_mean,
     )
 
     __version__ = version("cs336-alignment")
@@ -27,6 +28,7 @@ try:
         "compute_naive_policy_gradient_loss",
         "compute_grpo_clip_loss",
         "compute_policy_gradient_loss",
+        "masked_mean",
     ]
 
 except Exception:

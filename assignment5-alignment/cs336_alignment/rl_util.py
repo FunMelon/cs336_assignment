@@ -227,3 +227,40 @@ def compute_policy_gradient_loss(
         raise ValueError(f"Unknown loss_type: {loss_type}")
 
     return loss, metadata
+
+
+def masked_mean(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """
+    计算张量在指定维度上的掩码均值，只考虑掩码值为 1 的元素。
+
+    参数:
+        tensor: torch.Tensor，需要计算均值的张量。
+        mask: torch.Tensor，掩码张量。我们只对掩码值为 1 的元素计算均值。
+        dim: int | None，计算均值的维度。如果为 None，则对所有非掩码元素求和并除以它们的总数。
+
+    返回:
+        torch.Tensor，指定维度上只考虑掩码值为 1 的元素的均值。
+    """
+    # 1. 将掩码转换为与张量相同的数据类型
+    mask_float = mask.to(tensor.dtype)
+
+    # 2. 应用掩码：将掩码为 0 的位置置为 0
+    masked_tensor = tensor * mask_float
+
+    # 3. 计算掩码元素的数量
+    # 如果指定了维度，则沿该维度计算；否则计算总体
+    if dim is None:
+        # 展平后计算
+        count = mask_float.sum()
+    else:
+        count = mask_float.sum(dim=dim)
+
+    # 4. 计算掩码均值：求和除以计数
+    # 当 count = 0 时，PyTorch 会自动产生 NaN
+    mean = masked_tensor.sum(dim=dim) / count
+
+    return mean
