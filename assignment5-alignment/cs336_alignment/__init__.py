@@ -13,6 +13,7 @@ try:
         compute_group_normalized_rewards,
         compute_naive_policy_gradient_loss,
         compute_grpo_clip_loss,
+        compute_policy_gradient_loss,
     )
 
     __version__ = version("cs336-alignment")
@@ -25,6 +26,7 @@ try:
         "compute_group_normalized_rewards",
         "compute_naive_policy_gradient_loss",
         "compute_grpo_clip_loss",
+        "compute_policy_gradient_loss",
     ]
 
 except Exception:

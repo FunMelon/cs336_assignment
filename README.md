@@ -165,6 +165,7 @@
 - [x] 实现了计算组内标准差的函数（有偏估计）；
 - [x] 实现了朴素策略梯度；
 - [x] 实现clip loss;
+- [x] 实现策略梯度包装起；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward |
