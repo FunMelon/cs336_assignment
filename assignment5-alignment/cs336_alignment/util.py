@@ -242,3 +242,118 @@ def sft_microbatch_train_step(
     }
     
     return scaled_loss, metadata
+
+
+@torch.no_grad() # 生成阶段不需要计算梯度，节省显存并加速
+def log_generations(
+    model,
+    tokenizer,
+    prompts: list[str],
+    ground_truths: list[str],
+    reward_fn: callable,
+    step: int = 0,
+    max_new_tokens: int = 512,
+):
+    """
+    在训练后台生成回复，计算奖励与指标，并打印/记录日志。
+    """
+    # 1. 切换到评估模式
+    model.eval()
+    
+    # 2. 准备输入
+    # 左侧填充 (Left Padding) 对于仅解码的大模型生成是必须的
+    tokenizer.padding_side = "left"
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+    prompt_length = inputs["input_ids"].shape[1]
+    
+    # 3. 呼叫模型生成文本
+    # 开启 return_dict_in_generate 和 output_scores 以便后续计算信息熵
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        return_dict_in_generate=True,
+        output_scores=True,
+        output_logits=True,  # 明确要求返回原始 logits
+        do_sample=True, # 使用采样以观察真实分布的熵
+        temperature=1.0,
+    )
+    
+    generated_sequences = outputs.sequences
+    # output_logits=True 时使用 outputs.logits，否则使用 outputs.scores
+    if hasattr(outputs, 'logits') and outputs.logits is not None:
+        scores = outputs.logits  # list of (batch_size, vocab_size)
+    else:
+        scores = outputs.scores  # tuple of (batch_size, vocab_size)
+    
+    # 4. 提取生成的纯回复部分 (截掉前面的 prompt)
+    response_ids = generated_sequences[:, prompt_length:]
+    responses = tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+    
+    # 5. 计算指标：长度与奖励
+    total_format_reward = 0.0
+    total_answer_reward = 0.0
+    total_length = 0
+    
+    for i, (response, gt) in enumerate(zip(responses, ground_truths)):
+        # 调用你之前提供的 reward_fn
+        reward_dict = reward_fn(response, gt)
+        total_format_reward += reward_dict["format_reward"]
+        total_answer_reward += reward_dict["answer_reward"]
+        
+        # 计算该回答的有效长度 (非 pad token 的数量)
+        valid_length = (response_ids[i] != tokenizer.pad_token_id).sum().item()
+        total_length += valid_length
+        
+        # 仅在终端打印批次中的第一条数据作为肉眼检查
+        if i == 0:
+            print(f"\n{'='*20} 训练步数: {step} {'='*20}")
+            print(f"❓ [提示词]:\n{prompts[i]}")
+            print(f"✅ [标答]: {gt}")
+            print(f"🤖 [模型生成]:\n{response}")
+            print(f"🏅 [评分]: 格式={reward_dict['format_reward']}, 答案={reward_dict['answer_reward']}")
+            print(f"{'='*55}\n")
+
+    batch_size = len(prompts)
+    avg_format_reward = total_format_reward / batch_size
+    avg_answer_reward = total_answer_reward / batch_size
+    avg_length = total_length / batch_size
+    
+    # 6. 计算平均信息熵 (Entropy)
+    # scores 可能是:
+    # - tuple of (batch_size, vocab_size) 当使用 output_scores=True 时
+    # - tensor of (batch_size, generated_len, vocab_size) 当使用 output_logits=True 时
+    try:
+        if isinstance(scores, torch.Tensor):
+            # output_logits=True 返回的格式已经是 (batch_size, generated_len, vocab_size)
+            stacked_logits = scores
+        else:
+            # output_scores=True 返回的格式是 tuple，需要 stack
+            stacked_logits = torch.stack(scores, dim=1)
+        
+        # 调用 compute_entropy，返回形状 (batch_size, generated_len)
+        entropies = compute_entropy(stacked_logits)
+        # 只计算有效位置的熵（非 pad 位置）
+        # 使用 attention_mask 或根据生成的 token 来确定有效位置
+        valid_entropy = entropies[entropies > 0]
+        avg_entropy = valid_entropy.mean().item() if len(valid_entropy) > 0 else 0.0
+    except Exception as e:
+        print(f"计算熵时出错: {e}")
+        avg_entropy = 0.0
+        
+    # 7. 汇总日志字典返回
+    metrics = {
+        "eval/avg_format_reward": avg_format_reward,
+        "eval/avg_answer_reward": avg_answer_reward,
+        "eval/avg_response_length": avg_length,
+        "eval/avg_entropy": avg_entropy,
+    }
+    
+    print(f"📊 [批次统计] 步数: {step} | 格式分: {avg_format_reward:.2f} | 答案分: {avg_answer_reward:.2f} | 长度: {avg_length:.1f} | 熵: {avg_entropy:.4f}")
+    
+    # 切回训练模式，不要影响后续的 SFT 梯度计算
+    tokenizer.padding_side = "right" # 恢复训练时常用的右侧填充
+    model.train()
+    
+    return metrics
