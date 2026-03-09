@@ -148,15 +148,21 @@
 - `assignment5-alignment/cs336_alignment/util.py`: 工具脚本，包含SFT所需的若干helper函数；
 - `assignment5-alignment/cs336_alignment/train_sft.py`: SFT训练脚本；
 - `assignment5-alignment/cs336_alignment/run_vllm_eval`: 训练过程中调用vllm进行评估的脚本；
+- `assignment5-alignment/cs336_alignment/rl_util.py`: GRPO新增的工具脚本；
 
+
+## 评估
 - [x] 完成了使用vllm推理脚本；
 - [x] 完成了评估脚本；
+## SFT
 - [x] 实现了tokenize prompt并应用掩码；
 - [x] 实现计算预测熵的功能；
 - [x] 实现计算response log prob的功能；
 - [x] 实现masked normalize的功能；
 - [x] 实现了sft_microbatch_train_step的功能；
 - [x] 实现了双卡SFT + vllm推理；
+## GRPO
+- [x] 实现了计算组内标准差的函数（有偏估计）；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward |

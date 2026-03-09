@@ -9,6 +9,10 @@ try:
         sft_microbatch_train_step,
     )
 
+    from .rl_util import (
+        compute_group_normalized_rewards,
+    )
+
     __version__ = version("cs336-alignment")
     __all__ = [
         "tokenize_prompt_and_output",
@@ -16,6 +20,7 @@ try:
         "get_response_log_probs",
         "masked_normalize",
         "sft_microbatch_train_step",
+        "compute_group_normalized_rewards",
     ]
 
 except Exception:
