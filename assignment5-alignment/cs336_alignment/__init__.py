@@ -11,6 +11,7 @@ try:
 
     from .rl_util import (
         compute_group_normalized_rewards,
+        compute_naive_policy_gradient_loss,
     )
 
     __version__ = version("cs336-alignment")
@@ -21,6 +22,7 @@ try:
         "masked_normalize",
         "sft_microbatch_train_step",
         "compute_group_normalized_rewards",
+        "compute_naive_policy_gradient_loss",
     ]
 
 except Exception:

@@ -163,6 +163,7 @@
 - [x] 实现了双卡SFT + vllm推理；
 ## GRPO
 - [x] 实现了计算组内标准差的函数（有偏估计）；
+- [x] 实现了朴素策略梯度；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward |

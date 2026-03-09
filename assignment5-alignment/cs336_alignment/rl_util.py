@@ -85,3 +85,18 @@ def compute_group_normalized_rewards(
     }
     
     return advantages, raw_rewards, metadata
+
+def compute_naive_policy_gradient_loss(
+    raw_rewards_or_advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+) -> torch.Tensor:
+    """
+    计算每个token的策略梯度损失，其中raw_rewards_or_advantages可以是原始奖励或已经归一化的优势值。
+    Args:
+        raw_rewards_or_advantages: torch.Tensor Shape (batch_size, 1), 每个rollout响应的标量奖励/优势值。
+        policy_log_probs: torch.Tensor Shape (batch_size, sequence_length), 每个token的对数概率。
+    Returns:
+        torch.Tensor Shape (batch_size, sequence_length), 每个token的策略梯度损失（将在训练循环中跨batch和sequence维度进行聚合）。
+    """
+
+    return -raw_rewards_or_advantages * policy_log_probs
