@@ -35,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run inference on GSM8K using vLLM.")
     
     # 默认路径设置
-    default_model_path = "/root/paddlejob/workspace/env_run/theft/cs336_data/model/SFT"
+    default_model_path = "/root/paddlejob/workspace/env_run/theft/cs336_data/model/GRPO"
     default_data_path = "./dataset/gsm8k/processed_with_label/test.jsonl"
     
     # 获取当前脚本所在目录，以便定位 prompt 文件
@@ -64,9 +64,9 @@ def main():
 
     # 4. 设置采样参数 (保持与 baseline 一致)
     sampling_params = SamplingParams(
-        temperature=0.0,
+        temperature=0.7,
         top_p=1.0,
-        max_tokens=2048,
+        max_tokens=512,
         stop=["</answer>", "User:", "\n\nUser:"],
         include_stop_str_in_output=True
     )

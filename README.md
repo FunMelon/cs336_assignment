@@ -149,7 +149,7 @@
 - `assignment5-alignment/cs336_alignment/train_sft.py`: SFT训练脚本；
 - `assignment5-alignment/cs336_alignment/run_vllm_eval`: 训练过程中调用vllm进行评估的脚本；
 - `assignment5-alignment/cs336_alignment/rl_util.py`: GRPO新增的工具脚本；
-
+- `assignment5-alignment/cs336_alignment/train_grpo.py`: GRPO训练脚本；
 
 ## 评估
 - [x] 完成了使用vllm推理脚本；
@@ -168,9 +168,11 @@
 - [x] 实现策略梯度包装起；
 - [x] 实现mask mean；
 - [x] 实现GRPO微批次梯度更新；
+- [x] 实现了GRPO训练脚本；
 
 ## 在GSM8K上的实验结果
 | 模型 | format_reward | answer_reward |
 |---|---|---|
-| base模型| 0.7870 | 0.2032 |
-| SFT模型 | 0.9780 | 0.5353 |
+| base模型| 0.5512 | 0.1304 |
+| SFT模型 | 0.8211 | 0.3412 |
+| GRPO模型 | 0.9310 | 0.7074 |
