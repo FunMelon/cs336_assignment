@@ -56,7 +56,7 @@ class Config:
     sampling_max_tokens: int = 512       # 生成答案的最大 tokens 数
     
     # 损失函数配置
-    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "grpo_clip"
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip", "gspo_clip"] = "gspo_clip"
     use_std_normalization: bool = False   # 是否使用标准差归一化
     use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
@@ -106,10 +106,10 @@ def validate_config(config: Config):
         f"train_batch_size ({config.train_batch_size}) 整除"
     )
     
-    # GRPO-Clip 仅在 off-policy 设置下使用
-    if config.loss_type == "grpo_clip":
+    # GRPO-Clip 和 GSPO-Clip 仅在 off-policy 设置下使用
+    if config.loss_type in ["grpo_clip", "gspo_clip"]:
         assert config.epochs_per_rollout_batch > 1, (
-            "GRPO-Clip 仅在 off-policy（epochs_per_rollout_batch > 1）设置下使用，"
+            f"{config.loss_type} 仅在 off-policy（epochs_per_rollout_batch > 1）设置下使用，"
             "因为它需要旧的对数概率"
         )
     
@@ -482,10 +482,10 @@ def train():
         raw_rewards = raw_rewards.to(config.train_device)
         
         # ------------------------------------------
-        # 8.5 对于 off-policy（GRPO-Clip），预先计算旧的 log probs
+        # 8.5 对于 off-policy（GRPO-Clip/GSPO-Clip），预先计算旧的 log probs
         # ------------------------------------------
         old_log_probs_all = None
-        if config.loss_type == "grpo_clip" and config.epochs_per_rollout_batch > 1:
+        if config.loss_type in ["grpo_clip", "gspo_clip"] and config.epochs_per_rollout_batch > 1:
             # 只计算一次，不对其求导
             policy.eval()
             with torch.inference_mode():
@@ -592,7 +592,7 @@ def train():
                         raw_rewards=batch_raw_rewards.unsqueeze(-1) if config.loss_type == "no_baseline" else None,
                         advantages=batch_advantages.unsqueeze(-1) if config.loss_type != "no_baseline" else None,
                         old_log_probs=batch_old_log_probs,
-                        cliprange=config.cliprange if config.loss_type == "grpo_clip" else None,
+                        cliprange=config.cliprange if config.loss_type in ["grpo_clip", "gspo_clip"] else None,
                         use_length_normalization=config.use_length_normalization,
                     )
                     

@@ -204,10 +204,82 @@ def compute_grpo_clip_loss(
 
     return loss, metadata
 
+def compute_gspo_clip_loss(
+    advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    cliprange: float,
+    response_mask: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    计算 GSPO (Group Sequence Policy Optimization) 剪辑损失函数。
+    
+    与 GRPO 的关键区别：
+    1. 重要性比率在序列级别计算（使用几何平均）
+    2. Clip 在序列级别进行
+    3. 所有 token 共享相同的序列级权重，消除了 token 级别的方差累积
+    
+    核心公式:
+        s(θ) = (π_θ(y|x) / π_θ_old(y|x))^(1/|y|) = exp(mean(log_ratio))
+        L(θ) = -min(s(θ) * A, clip(s(θ), 1-ε, 1+ε) * A)
+    
+    Args:
+        advantages: torch.Tensor 形状 (batch_size,) 或 (batch_size, 1)，每个样本的优势值。
+        policy_log_probs: torch.Tensor 形状 (batch_size, sequence_length)，当前策略的 token log probs。
+        old_log_probs: torch.Tensor 形状 (batch_size, sequence_length)，旧策略的 token log probs。
+        cliprange: float 裁剪参数 ε。
+        response_mask: torch.Tensor 形状 (batch_size, sequence_length)，响应掩码。
+    
+    Returns:
+        tuple[torch.Tensor, dict]:
+            loss: 形状 (batch_size,)，每个样本的序列级损失。
+            metadata: 包含日志信息的字典。
+    """
+    mask_float = response_mask.to(policy_log_probs.dtype)
+    
+    # 1. 计算 token 级 log ratio
+    log_ratio = policy_log_probs - old_log_probs  # (B, T)
+    
+    # 2. 计算序列级 log ratio 的均值（几何平均的对数）
+    # s(θ) = exp(1/|y| * Σ_t [log π_θ - log π_old])
+    seq_lengths = mask_float.sum(dim=1).clamp(min=1)  # (B,)
+    mean_log_ratio = (log_ratio * mask_float).sum(dim=1) / seq_lengths  # (B,)
+    
+    # 3. 序列级重要性比率（几何平均）
+    seq_ratio = torch.exp(mean_log_ratio)  # (B,)
+    
+    # 4. 序列级 Clipping（而非 token 级）
+    clipped_ratio = torch.clamp(seq_ratio, 1 - cliprange, 1 + cliprange)
+    
+    # 5. 确保 advantages 形状正确 (B,)
+    if advantages.dim() == 2:
+        advantages = advantages.squeeze(-1)
+    
+    # 6. 计算目标函数并取较小值（保守更新）
+    unclipped_obj = seq_ratio * advantages
+    clipped_obj = clipped_ratio * advantages
+    objective = torch.min(unclipped_obj, clipped_obj)
+    
+    # 7. 损失 = -目标函数（最小化负的目标函数）
+    loss = -objective  # (B,)
+    
+    # 统计信息
+    was_clipped = (seq_ratio * advantages != clipped_ratio * advantages).float()
+    
+    metadata = {
+        "loss/clip_fraction": was_clipped.mean().item(),
+        "loss/mean": loss.mean().item(),
+        "ratio/seq_mean": seq_ratio.mean().item(),
+        "ratio/seq_std": seq_ratio.std().item() if seq_ratio.numel() > 1 else 0.0,
+        "ratio/seq_min": seq_ratio.min().item(),
+        "ratio/seq_max": seq_ratio.max().item(),
+    }
+    
+    return loss, metadata
 
 def compute_policy_gradient_loss(
     policy_log_probs: torch.Tensor,
-    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip", "gspo_clip"],
     raw_rewards: torch.Tensor | None= None,
     advantages: torch.Tensor | None= None,
     old_log_probs: torch.Tensor | None= None,
@@ -219,16 +291,17 @@ def compute_policy_gradient_loss(
 
     参数:
         policy_log_probs: torch.Tensor 形状为 (batch_size, sequence_length)，来自被训练策略的每个 token 的对数概率。
-        loss_type: str 取值为 "no_baseline"、"reinforce_with_baseline" 或 "grpo_clip" 之一。
+        loss_type: str 取值为 "no_baseline"、"reinforce_with_baseline"、"grpo_clip" 或 "gspo_clip" 之一。
         raw_rewards: torch.Tensor | None 当 loss_type == "no_baseline" 时需要，形状为 (batch_size, 1)。
-        advantages: torch.Tensor | None 当 loss_type 为 "reinforce_with_baseline" 和 "grpo_clip" 时需要，形状为 (batch_size, 1)。
-        old_log_probs: torch.Tensor | None 当 loss_type == "grpo_clip" 时需要，形状为 (batch_size, sequence_length)。
-        cliprange: float | None 当 loss_type == "grpo_clip" 时需要，用于裁剪的 epsilon 值。
+        advantages: torch.Tensor | None 当 loss_type 为 "reinforce_with_baseline"、"grpo_clip" 和 "gspo_clip" 时需要，形状为 (batch_size, 1)。
+        old_log_probs: torch.Tensor | None 当 loss_type == "grpo_clip" 或 "gspo_clip" 时需要，形状为 (batch_size, sequence_length)。
+        cliprange: float | None 当 loss_type == "grpo_clip" 或 "gspo_clip" 时需要，用于裁剪的 epsilon 值。
+        response_mask: torch.Tensor | None 当 loss_type == "gspo_clip" 时必须提供，用于计算序列级比率。
 
     返回:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
-            loss: 形状为 (batch_size, sequence_length)，每个 token 的损失值。
-            metadata dict: 来自底层例程的统计数据（例如 GRPO-Clip 的裁剪比例）。
+            loss: 形状为 (batch_size, sequence_length) 或 (batch_size,)，每个 token 或每个序列的损失值。
+            metadata dict: 来自底层例程的统计数据（例如裁剪比例）。
     """
     if loss_type == "no_baseline":
         # 朴素策略梯度：直接使用原始奖励
@@ -243,7 +316,7 @@ def compute_policy_gradient_loss(
         loss = compute_naive_policy_gradient_loss(advantages, policy_log_probs)
         metadata = {"loss_type": "reinforce_with_baseline"}
     elif loss_type == "grpo_clip":
-        # GRPO Clip：使用裁剪的策略梯度损失
+        # GRPO Clip：使用 token 级裁剪的策略梯度损失
         if advantages is None or old_log_probs is None or cliprange is None:
             raise ValueError("advantages, old_log_probs, and cliprange are required for loss_type='grpo_clip'")
         loss, metadata = compute_grpo_clip_loss(
@@ -254,6 +327,18 @@ def compute_policy_gradient_loss(
             response_mask=response_mask
         )
         metadata["loss_type"] = "grpo_clip"
+    elif loss_type == "gspo_clip":
+        # GSPO Clip：使用序列级裁剪的策略梯度损失
+        if advantages is None or old_log_probs is None or cliprange is None or response_mask is None:
+            raise ValueError("advantages, old_log_probs, cliprange, and response_mask are required for loss_type='gspo_clip'")
+        loss, metadata = compute_gspo_clip_loss(
+            advantages=advantages, 
+            policy_log_probs=policy_log_probs, 
+            old_log_probs=old_log_probs, 
+            cliprange=cliprange,
+            response_mask=response_mask
+        )
+        metadata["loss_type"] = "gspo_clip"
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
 
@@ -301,7 +386,7 @@ def grpo_microbatch_train_step(
     policy_log_probs: torch.Tensor,
     response_mask: torch.Tensor,
     gradient_accumulation_steps: int,
-    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip", "gspo_clip"],
     raw_rewards: torch.Tensor | None = None,
     advantages: torch.Tensor | None = None,
     old_log_probs: torch.Tensor | None = None,
@@ -311,26 +396,25 @@ def grpo_microbatch_train_step(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     在一个微批次上计算策略梯度损失并执行反向传播。
+    支持 GRPO (token 级) 和 GSPO (序列级) 两种损失类型。
 
     参数:
         policy_log_probs: torch.Tensor 形状为 (batch_size, sequence_length)，策略的每个 token 的对数概率。
         response_mask: torch.Tensor 形状为 (batch_size, sequence_length)，响应的掩码。
         gradient_accumulation_steps: int，梯度累加的步数。
-        loss_type: str，损失函数类型，取值为 "no_baseline"、"reinforce_with_baseline" 或 "grpo_clip"。
+        loss_type: str，损失函数类型，取值为 "no_baseline"、"reinforce_with_baseline"、"grpo_clip" 或 "gspo_clip"。
         raw_rewards: torch.Tensor | None，原始奖励，当 loss_type="no_baseline" 时需要。
-        advantages: torch.Tensor | None，优势值，当 loss_type 为 "reinforce_with_baseline" 或 "grpo_clip" 时需要。
-        old_log_probs: torch.Tensor | None，旧策略的对数概率，当 loss_type="grpo_clip" 时需要。
-        cliprange: float | None，裁剪范围，当 loss_type="grpo_clip" 时需要。
-        normalize_constant: float | None，归一化常数，如果提供则在序列维度上求和并用此常数归一化（如 Dr. GRPO 的做法）。
-        use_length_normalization: bool，是否对序列长度进行归一化。
-            - False (默认，推荐): 对序列维度求和 (sum)，避免长度偏置，符合标准 RL 做法。
-            - True: 对序列维度求均值 (mean)，会引入长度偏置（Advantage/T），可能导致负奖励时生成冗长废话。
+        advantages: torch.Tensor | None，优势值，当 loss_type 需要优势时。
+        old_log_probs: torch.Tensor | None，旧策略的对数概率，当 loss_type 需要时。
+        cliprange: float | None，裁剪范围。
+        normalize_constant: float | None，归一化常数。
+        use_length_normalization: bool，是否对序列长度进行归一化（仅对 token 级损失有效）。
 
     返回:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
             缩放后的损失和元数据。
     """
-    # 1. 计算每个 token 的策略梯度损失
+    # 1. 计算策略梯度损失
     loss, metadata = compute_policy_gradient_loss(
         policy_log_probs=policy_log_probs,
         loss_type=loss_type,
@@ -341,26 +425,27 @@ def grpo_microbatch_train_step(
         response_mask=response_mask,
     )
 
-    # 2. 应用响应掩码并计算每个样本的损失
-    mask_float = response_mask.to(loss.dtype)
-    
-    if use_length_normalization:
-        # 对序列长度求均值（原始做法）
-        # 警告：会引入长度偏置 (Advantage/T)，可能导致负奖励时生成冗长废话
-        per_example_loss = masked_mean(loss, response_mask, dim=1)
+    # 2. 根据损失类型选择聚合方式
+    if loss_type == "gspo_clip":
+        # GSPO: 损失已经是序列级别的 (batch_size,)，直接在 batch 维度求均值
+        per_example_loss = loss  # (batch_size,)
     else:
-        # 对序列长度求和（推荐做法）
-        # 避免长度偏置，符合标准策略梯度理论
-        per_example_loss = (loss * mask_float).sum(dim=1)
+        # GRPO 和其他: 损失是 token 级别的 (batch_size, seq_len)，需要在序列维度聚合
+        mask_float = response_mask.to(loss.dtype)
+        
+        if use_length_normalization:
+            # 对序列长度求均值（原始做法）
+            per_example_loss = masked_mean(loss, response_mask, dim=1)
+        else:
+            # 对序列长度求和（推荐做法）
+            per_example_loss = (loss * mask_float).sum(dim=1)
 
     # 3. 如果提供了 normalize_constant，则使用 Dr. GRPO 的做法
-    # 即在序列维度上求和后除以 normalize_constant，最后在批次维度上求均值
-    if normalize_constant is not None:
-        # Dr. GRPO 风格：每个样本除以固定常数（如最大长度），然后在批次维度上求均值
-        # 注意：必须在批次维度上求均值，否则梯度大小会随 batch_size 线性缩放
+    if normalize_constant is not None and loss_type != "gspo_clip":
+        # GSPO 已经是序列级别，不需要额外归一化
         normalized_loss = (per_example_loss / normalize_constant).mean()
     else:
-        # 标准做法：对每个样本求和后再在批次上求均值
+        # 标准做法：在批次上求均值
         normalized_loss = per_example_loss.mean()
 
     # 4. 梯度累加缩放
