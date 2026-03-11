@@ -48,7 +48,7 @@ class Config:
     group_size: int = 8                  # 每个 prompt 生成的回答数量
     train_batch_size: int = 256          # 宏批大小
     gradient_accumulation_steps: int = 32  # 梯度累积步数
-    epochs_per_rollout_batch: int = 1    # 每个 rollout batch 训练的 epoch 数，1 = On-policy
+    epochs_per_rollout_batch: int = 2    # 每个 rollout batch 训练的 epoch 数，1 = On-policy
     
     # 采样配置
     sampling_temperature: float = 0.7    # 采样温度
@@ -56,8 +56,8 @@ class Config:
     sampling_max_tokens: int = 512       # 生成答案的最大 tokens 数
     
     # 损失函数配置
-    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline"
-    use_std_normalization: bool = True   # 是否使用标准差归一化
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "grpo_clip"
+    use_std_normalization: bool = False   # 是否使用标准差归一化
     use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
     
