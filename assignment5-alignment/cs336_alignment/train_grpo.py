@@ -58,6 +58,7 @@ class Config:
     # 损失函数配置
     loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline"
     use_std_normalization: bool = True   # 是否使用标准差归一化
+    use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
     
     # 优化器配置
@@ -69,7 +70,7 @@ class Config:
     advantage_eps: float = 1e-6          # 计算优势时防止除零
     
     # 验证与日志配置
-    eval_interval: int = 1               # 每隔多少步进行验证
+    eval_interval: int = 2               # 每隔多少步进行验证
     log_interval: int = 2               # 每隔多少步打印日志
     save_interval: int = 5              # 每隔多少步保存检查点
     max_eval_samples: int = 1024         # 验证样本数量（至少 1024 个以减少噪音）
@@ -592,12 +593,13 @@ def train():
                         advantages=batch_advantages.unsqueeze(-1) if config.loss_type != "no_baseline" else None,
                         old_log_probs=batch_old_log_probs,
                         cliprange=config.cliprange if config.loss_type == "grpo_clip" else None,
+                        use_length_normalization=config.use_length_normalization,
                     )
                     
                     total_loss += loss_metadata['unscaled_loss'].item()
                     global_micro_idx += 1
                 
-                # 梯度裁剪
+                # 梯度裁剪（返回的是裁剪前的梯度范数）
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     policy.parameters(), 
                     max_norm=config.max_grad_norm
@@ -618,17 +620,20 @@ def train():
         # 8.7 记录日志
         # ------------------------------------------
         if grpo_step % config.log_interval == 0:
+            clipped_indicator = " [CLIPPED]" if grad_norm > config.max_grad_norm else ""
             print(f"[Step {grpo_step}/{config.n_grpo_steps}] "
                   f"Loss: {avg_loss:.4f} | "
                   f"Reward: {reward_metadata['reward/mean']:.4f} (std: {reward_metadata['reward/std']:.4f}) | "
                   f"Format: {reward_metadata['reward/format_mean']:.2f} | "
                   f"Answer: {reward_metadata['reward/answer_mean']:.2f} | "
                   f"Entropy: {avg_entropy:.4f} | "
-                  f"GradNorm: {grad_norm:.4f}")
+                  f"GradNorm: {grad_norm:.2f}{clipped_indicator} (max: {config.max_grad_norm})")
             
             # TensorBoard 记录
             writer.add_scalar("train/loss", avg_loss, grpo_step)
             writer.add_scalar("train/grad_norm", grad_norm, grpo_step)
+            writer.add_scalar("train/grad_norm_clipped", min(grad_norm, config.max_grad_norm), grpo_step)
+            writer.add_scalar("train/grad_clip_ratio", grad_norm / config.max_grad_norm, grpo_step)
             writer.add_scalar("train/reward_mean", reward_metadata['reward/mean'], grpo_step)
             writer.add_scalar("train/reward_std", reward_metadata['reward/std'], grpo_step)
             writer.add_scalar("train/format_reward", reward_metadata['reward/format_mean'], grpo_step)

@@ -106,6 +106,7 @@ def compute_grpo_clip_loss(
     policy_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     cliprange: float,
+    response_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     计算 GRPO 剪辑损失函数 (Clipped Loss)。
@@ -155,28 +156,51 @@ def compute_grpo_clip_loss(
     # 原因: min(-x, -y) = -max(x, y) ≠ -min(x, y)
     loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-    # 5. 计算裁剪统计信息用于日志记录
+    # 计算裁剪统计信息用于日志记录
     # 当 ratio 被裁剪且裁剪后的损失更小时，认为发生了裁剪
     # 检查每个 token 是否被裁剪 (裁剪后的损失是否被选中)
     was_clipped = (ratio * advantages != clipped_ratio * advantages).float()
 
-    # 计算裁剪率 (被裁剪的 token 占比)
-    clip_fraction = was_clipped.mean().item()
-
-    # 计算原始损失和裁剪后损失用于日志记录
-    original_loss = -ratio * advantages
-    clipped_loss = -clipped_ratio * advantages
-
-    metadata = {
-        "loss/clip_fraction": clip_fraction,
-        "loss/mean": loss.mean().item(),
-        "loss/mean_original": original_loss.mean().item(),
-        "loss/mean_clipped": clipped_loss.mean().item(),
-        "ratio/mean": ratio.mean().item(),
-        "ratio/std": ratio.std().item(),
-        "ratio/min": ratio.min().item(),
-        "ratio/max": ratio.max().item(),
-    }
+    if response_mask is not None:
+        mask_float = response_mask.to(torch.float32)
+        clip_fraction = masked_mean(was_clipped, mask_float).item()
+        
+        # 计算原始损失和裁剪后损失用于日志记录
+        original_loss = -ratio * advantages
+        clipped_loss = -clipped_ratio * advantages
+        
+        loss_mean = masked_mean(loss, mask_float).item()
+        original_loss_mean = masked_mean(original_loss, mask_float).item()
+        clipped_loss_mean = masked_mean(clipped_loss, mask_float).item()
+        
+        ratio_mean = masked_mean(ratio, mask_float).item()
+        
+        # min 和 max 只取 mask 内的值
+        masked_ratio = ratio * mask_float + (1 - mask_float) * 1.0 # 不影响 min/max 如果不全为 0
+        
+        metadata = {
+            "loss/clip_fraction": clip_fraction,
+            "loss/mean": loss_mean,
+            "loss/mean_original": original_loss_mean,
+            "loss/mean_clipped": clipped_loss_mean,
+            "ratio/mean": ratio_mean,
+        }
+    else:
+        # 兼容没有传入 mask 的情况
+        clip_fraction = was_clipped.mean().item()
+        original_loss = -ratio * advantages
+        clipped_loss = -clipped_ratio * advantages
+        
+        metadata = {
+            "loss/clip_fraction": clip_fraction,
+            "loss/mean": loss.mean().item(),
+            "loss/mean_original": original_loss.mean().item(),
+            "loss/mean_clipped": clipped_loss.mean().item(),
+            "ratio/mean": ratio.mean().item(),
+            "ratio/std": ratio.std().item(),
+            "ratio/min": ratio.min().item(),
+            "ratio/max": ratio.max().item(),
+        }
 
     return loss, metadata
 
@@ -188,6 +212,7 @@ def compute_policy_gradient_loss(
     advantages: torch.Tensor | None= None,
     old_log_probs: torch.Tensor | None= None,
     cliprange: float | None= None,
+    response_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     选择并计算所需的策略梯度损失函数。
@@ -221,7 +246,13 @@ def compute_policy_gradient_loss(
         # GRPO Clip：使用裁剪的策略梯度损失
         if advantages is None or old_log_probs is None or cliprange is None:
             raise ValueError("advantages, old_log_probs, and cliprange are required for loss_type='grpo_clip'")
-        loss, metadata = compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange)
+        loss, metadata = compute_grpo_clip_loss(
+            advantages=advantages, 
+            policy_log_probs=policy_log_probs, 
+            old_log_probs=old_log_probs, 
+            cliprange=cliprange,
+            response_mask=response_mask
+        )
         metadata["loss_type"] = "grpo_clip"
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
@@ -276,6 +307,7 @@ def grpo_microbatch_train_step(
     old_log_probs: torch.Tensor | None = None,
     cliprange: float | None = None,
     normalize_constant: float | None = None,
+    use_length_normalization: bool = True,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     在一个微批次上计算策略梯度损失并执行反向传播。
@@ -290,6 +322,9 @@ def grpo_microbatch_train_step(
         old_log_probs: torch.Tensor | None，旧策略的对数概率，当 loss_type="grpo_clip" 时需要。
         cliprange: float | None，裁剪范围，当 loss_type="grpo_clip" 时需要。
         normalize_constant: float | None，归一化常数，如果提供则在序列维度上求和并用此常数归一化（如 Dr. GRPO 的做法）。
+        use_length_normalization: bool，是否对序列长度进行归一化。
+            - False (默认，推荐): 对序列维度求和 (sum)，避免长度偏置，符合标准 RL 做法。
+            - True: 对序列维度求均值 (mean)，会引入长度偏置（Advantage/T），可能导致负奖励时生成冗长废话。
 
     返回:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -303,20 +338,29 @@ def grpo_microbatch_train_step(
         advantages=advantages,
         old_log_probs=old_log_probs,
         cliprange=cliprange,
+        response_mask=response_mask,
     )
 
     # 2. 应用响应掩码并计算每个样本的损失
-    # 使用 masked_mean 计算每个样本的平均损失
-    per_example_loss = masked_mean(loss, response_mask, dim=1)
+    mask_float = response_mask.to(loss.dtype)
+    
+    if use_length_normalization:
+        # 对序列长度求均值（原始做法）
+        # 警告：会引入长度偏置 (Advantage/T)，可能导致负奖励时生成冗长废话
+        per_example_loss = masked_mean(loss, response_mask, dim=1)
+    else:
+        # 对序列长度求和（推荐做法）
+        # 避免长度偏置，符合标准策略梯度理论
+        per_example_loss = (loss * mask_float).sum(dim=1)
 
     # 3. 如果提供了 normalize_constant，则使用 Dr. GRPO 的做法
-    # 即在序列维度上求和后除以 normalize_constant
+    # 即在序列维度上求和后除以 normalize_constant，最后在批次维度上求均值
     if normalize_constant is not None:
-        # 先求和再归一化 (Dr. GRPO 风格)
-        summed_loss = masked_mean(loss, response_mask, dim=1).sum() / normalize_constant
-        normalized_loss = summed_loss
+        # Dr. GRPO 风格：每个样本除以固定常数（如最大长度），然后在批次维度上求均值
+        # 注意：必须在批次维度上求均值，否则梯度大小会随 batch_size 线性缩放
+        normalized_loss = (per_example_loss / normalize_constant).mean()
     else:
-        # 标准做法：对每个样本求均值后再在批次上求均值
+        # 标准做法：对每个样本求和后再在批次上求均值
         normalized_loss = per_example_loss.mean()
 
     # 4. 梯度累加缩放
