@@ -60,6 +60,7 @@ class Config:
     use_std_normalization: bool = False   # 是否使用标准差归一化
     use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
+    use_asymmetric_clip: bool = True    # 是否启用非对称裁剪（上界放宽为 1+2*cliprange）
     
     # 优化器配置
     weight_decay: float = 0.0            # 权重衰减
@@ -432,6 +433,7 @@ def train():
     print(f"vLLM GPU: {config.vllm_device}")
     print(f"损失类型: {config.loss_type}")
     print(f"标准差归一化: {config.use_std_normalization}")
+    print(f"非对称裁剪: {config.use_asymmetric_clip}")
     print("=" * 60 + "\n")
     
     for grpo_step in range(1, config.n_grpo_steps + 1):
@@ -594,6 +596,7 @@ def train():
                         old_log_probs=batch_old_log_probs,
                         cliprange=config.cliprange if config.loss_type == "grpo_clip" else None,
                         use_length_normalization=config.use_length_normalization,
+                        use_asymmetric_clip=config.use_asymmetric_clip,
                     )
                     
                     total_loss += loss_metadata['unscaled_loss'].item()

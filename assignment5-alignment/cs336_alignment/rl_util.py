@@ -107,6 +107,7 @@ def compute_grpo_clip_loss(
     old_log_probs: torch.Tensor,
     cliprange: float,
     response_mask: torch.Tensor | None = None,
+    use_asymmetric_clip: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     计算 GRPO 剪辑损失函数 (Clipped Loss)。
@@ -145,10 +146,12 @@ def compute_grpo_clip_loss(
     if advantages.dim() == 1:
         advantages = advantages.unsqueeze(-1)
 
-    # 3. 计算裁剪后的比率: clip(r(θ), 1-ε, 1+ε)
-    # 当 A > 0 时: 裁剪上限为 1+ε，防止过度增加概率
-    # 当 A < 0 时: 裁剪下限为 1-ε，防止过度减少概率
-    clipped_ratio = torch.clamp(ratio, 1 - cliprange, 1 + cliprange)
+    # 3. 计算裁剪后的比率
+    # 默认使用对称裁剪 [1-ε, 1+ε]
+    # 可选非对称裁剪 [1-ε, 1+2ε]，放宽正向更新，缓解探索/熵过快收缩
+    clip_low = 1 - cliprange
+    clip_high = 1 + (2 * cliprange if use_asymmetric_clip else cliprange)
+    clipped_ratio = torch.clamp(ratio, clip_low, clip_high)
 
     # 4. 计算 PPO/GRPO 核心损失公式: L = -min(r*A, clip(r)*A)
     # 注意: 必须先计算 min(r*A, clip(r)*A)，再取负号
@@ -184,6 +187,9 @@ def compute_grpo_clip_loss(
             "loss/mean_original": original_loss_mean,
             "loss/mean_clipped": clipped_loss_mean,
             "ratio/mean": ratio_mean,
+            "clip/use_asymmetric": float(use_asymmetric_clip),
+            "clip/low": clip_low,
+            "clip/high": clip_high,
         }
     else:
         # 兼容没有传入 mask 的情况
@@ -200,6 +206,9 @@ def compute_grpo_clip_loss(
             "ratio/std": ratio.std().item(),
             "ratio/min": ratio.min().item(),
             "ratio/max": ratio.max().item(),
+            "clip/use_asymmetric": float(use_asymmetric_clip),
+            "clip/low": clip_low,
+            "clip/high": clip_high,
         }
 
     return loss, metadata
@@ -213,6 +222,7 @@ def compute_policy_gradient_loss(
     old_log_probs: torch.Tensor | None= None,
     cliprange: float | None= None,
     response_mask: torch.Tensor | None = None,
+    use_asymmetric_clip: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     选择并计算所需的策略梯度损失函数。
@@ -247,11 +257,12 @@ def compute_policy_gradient_loss(
         if advantages is None or old_log_probs is None or cliprange is None:
             raise ValueError("advantages, old_log_probs, and cliprange are required for loss_type='grpo_clip'")
         loss, metadata = compute_grpo_clip_loss(
-            advantages=advantages, 
-            policy_log_probs=policy_log_probs, 
-            old_log_probs=old_log_probs, 
+            advantages=advantages,
+            policy_log_probs=policy_log_probs,
+            old_log_probs=old_log_probs,
             cliprange=cliprange,
-            response_mask=response_mask
+            response_mask=response_mask,
+            use_asymmetric_clip=use_asymmetric_clip,
         )
         metadata["loss_type"] = "grpo_clip"
     else:
@@ -308,6 +319,7 @@ def grpo_microbatch_train_step(
     cliprange: float | None = None,
     normalize_constant: float | None = None,
     use_length_normalization: bool = True,
+    use_asymmetric_clip: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     在一个微批次上计算策略梯度损失并执行反向传播。
@@ -339,6 +351,7 @@ def grpo_microbatch_train_step(
         old_log_probs=old_log_probs,
         cliprange=cliprange,
         response_mask=response_mask,
+        use_asymmetric_clip=use_asymmetric_clip,
     )
 
     # 2. 应用响应掩码并计算每个样本的损失
