@@ -345,6 +345,70 @@ def compute_policy_gradient_loss(
     return loss, metadata
 
 
+def compute_kl_penalty(
+    policy_log_probs: torch.Tensor,
+    ref_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    kl_type: Literal["kl", "abs", "mse", "low_var"] = "kl",
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    计算策略与参考模型之间的 KL 散度惩罚。
+    
+    用于防止策略偏离参考模型（通常是初始 SFT 模型）太远，保持训练稳定性。
+    
+    Args:
+        policy_log_probs: torch.Tensor 形状 (batch_size, seq_len)，当前策略的 token log probs。
+        ref_log_probs: torch.Tensor 形状 (batch_size, seq_len)，参考模型的 token log probs。
+        response_mask: torch.Tensor 形状 (batch_size, seq_len)，响应掩码。
+        kl_type: str KL 散度的计算方式：
+            - "kl": 标准近似 KL = log(π_θ) - log(π_ref)（最常用）
+            - "abs": 绝对值 |log(π_θ) - log(π_ref)|
+            - "mse": 均方误差 (log(π_θ) - log(π_ref))²
+            - "low_var": 低方差估计 (r - 1) - log(r)，其中 r = π_θ/π_ref
+    
+    Returns:
+        tuple[torch.Tensor, dict]:
+            kl_penalty: 形状 (batch_size,)，每个样本的 KL 惩罚值。
+            metadata: 包含 KL 统计信息的字典。
+    """
+    mask_float = response_mask.to(policy_log_probs.dtype)
+    seq_lengths = mask_float.sum(dim=1).clamp(min=1)
+    
+    # 计算 log ratio
+    log_ratio = policy_log_probs - ref_log_probs  # (B, T)
+    
+    if kl_type == "kl":
+        # 标准近似：KL ≈ log(π_θ) - log(π_ref)
+        # 这是 KL(π_θ || π_ref) 的一阶近似
+        token_kl = log_ratio
+    elif kl_type == "abs":
+        # 绝对值：对正负偏离同等惩罚
+        token_kl = torch.abs(log_ratio)
+    elif kl_type == "mse":
+        # 均方误差：对大偏离惩罚更重
+        token_kl = log_ratio ** 2
+    elif kl_type == "low_var":
+        # 低方差估计：(r - 1) - log(r)，其中 r = exp(log_ratio)
+        # 这是 KL 的更精确估计，方差更低
+        ratio = torch.exp(log_ratio)
+        token_kl = (ratio - 1) - log_ratio
+    else:
+        raise ValueError(f"Unknown kl_type: {kl_type}")
+    
+    # 对每个序列计算平均 KL（只考虑 mask 内的 token）
+    kl_penalty = (token_kl * mask_float).sum(dim=1) / seq_lengths  # (B,)
+    
+    # 计算统计信息
+    total_kl = (token_kl * mask_float).sum() / mask_float.sum()
+    metadata = {
+        "kl/mean": total_kl.item(),
+        "kl/max": kl_penalty.max().item(),
+        "kl/min": kl_penalty.min().item(),
+    }
+    
+    return kl_penalty, metadata
+
+
 def masked_mean(
     tensor: torch.Tensor,
     mask: torch.Tensor,
@@ -393,10 +457,14 @@ def grpo_microbatch_train_step(
     cliprange: float | None = None,
     normalize_constant: float | None = None,
     use_length_normalization: bool = True,
+    # KL 散度惩罚相关参数
+    ref_log_probs: torch.Tensor | None = None,
+    kl_coef: float = 0.0,
+    kl_type: Literal["kl", "abs", "mse", "low_var"] = "kl",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     在一个微批次上计算策略梯度损失并执行反向传播。
-    支持 GRPO (token 级) 和 GSPO (序列级) 两种损失类型。
+    支持 GRPO (token 级) 和 GSPO (序列级) 两种损失类型，以及可选的 KL 散度惩罚。
 
     参数:
         policy_log_probs: torch.Tensor 形状为 (batch_size, sequence_length)，策略的每个 token 的对数概率。
@@ -409,6 +477,9 @@ def grpo_microbatch_train_step(
         cliprange: float | None，裁剪范围。
         normalize_constant: float | None，归一化常数。
         use_length_normalization: bool，是否对序列长度进行归一化（仅对 token 级损失有效）。
+        ref_log_probs: torch.Tensor | None，参考模型（通常是初始 SFT 模型）的对数概率，用于 KL 惩罚。
+        kl_coef: float，KL 散度惩罚系数 β。设为 0 则禁用 KL 惩罚。
+        kl_type: str，KL 散度的计算方式："kl", "abs", "mse", "low_var"。
 
     返回:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -443,20 +514,39 @@ def grpo_microbatch_train_step(
     # 3. 如果提供了 normalize_constant，则使用 Dr. GRPO 的做法
     if normalize_constant is not None and loss_type != "gspo_clip":
         # GSPO 已经是序列级别，不需要额外归一化
-        normalized_loss = (per_example_loss / normalize_constant).mean()
+        policy_loss = (per_example_loss / normalize_constant).mean()
     else:
         # 标准做法：在批次上求均值
-        normalized_loss = per_example_loss.mean()
+        policy_loss = per_example_loss.mean()
 
-    # 4. 梯度累加缩放
-    scaled_loss = normalized_loss / gradient_accumulation_steps
+    # 4. 计算 KL 散度惩罚（如果启用）
+    kl_loss = torch.tensor(0.0, device=policy_log_probs.device)
+    if kl_coef > 0 and ref_log_probs is not None:
+        kl_penalty, kl_metadata = compute_kl_penalty(
+            policy_log_probs=policy_log_probs,
+            ref_log_probs=ref_log_probs,
+            response_mask=response_mask,
+            kl_type=kl_type,
+        )
+        kl_loss = kl_coef * kl_penalty.mean()
+        metadata.update(kl_metadata)
+        metadata["kl/coef"] = kl_coef
+        metadata["kl/loss"] = kl_loss.item()
 
-    # 5. 执行反向传播
+    # 5. 总损失 = 策略损失 + KL 惩罚
+    total_loss = policy_loss + kl_loss
+
+    # 6. 梯度累加缩放
+    scaled_loss = total_loss / gradient_accumulation_steps
+
+    # 7. 执行反向传播
     scaled_loss.backward()
 
-    # 6. 组装日志元数据
+    # 8. 组装日志元数据
     metadata.update({
-        "unscaled_loss": normalized_loss.detach(),
+        "loss/policy": policy_loss.detach().item(),
+        "loss/kl": kl_loss.detach().item(),
+        "unscaled_loss": total_loss.detach(),
         "scaled_loss": scaled_loss.detach(),
     })
 

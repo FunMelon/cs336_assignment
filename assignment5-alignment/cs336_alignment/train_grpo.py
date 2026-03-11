@@ -61,6 +61,10 @@ class Config:
     use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
     
+    # KL 散度惩罚配置
+    kl_coef: float = 0.01                 # KL 惩罚系数 β，设为 0 禁用 KL 惩罚
+    kl_type: Literal["kl", "abs", "mse", "low_var"] = "kl"  # KL 散度计算方式
+    
     # 优化器配置
     weight_decay: float = 0.0            # 权重衰减
     betas: tuple = (0.9, 0.95)           # AdamW betas
@@ -584,6 +588,8 @@ def train():
                         batch_old_log_probs = old_log_probs_all[batch_indices]
                     
                     # 计算损失并反向传播
+                    # 注意：KL 惩罚使用 old_log_probs 作为参考模型的 log probs
+                    # 这意味着我们惩罚策略偏离 rollout 时的策略太远
                     scaled_loss, loss_metadata = grpo_microbatch_train_step(
                         policy_log_probs=policy_log_probs,
                         response_mask=response_mask,
@@ -594,6 +600,10 @@ def train():
                         old_log_probs=batch_old_log_probs,
                         cliprange=config.cliprange if config.loss_type in ["grpo_clip", "gspo_clip"] else None,
                         use_length_normalization=config.use_length_normalization,
+                        # KL 散度惩罚参数
+                        ref_log_probs=batch_old_log_probs,  # 使用 rollout 时的策略作为参考
+                        kl_coef=config.kl_coef,
+                        kl_type=config.kl_type,
                     )
                     
                     total_loss += loss_metadata['unscaled_loss'].item()
@@ -621,12 +631,17 @@ def train():
         # ------------------------------------------
         if grpo_step % config.log_interval == 0:
             clipped_indicator = " [CLIPPED]" if grad_norm > config.max_grad_norm else ""
+            # 获取 KL 相关日志（如果启用）
+            kl_info = ""
+            if config.kl_coef > 0 and 'kl/mean' in loss_metadata:
+                kl_info = f" | KL: {loss_metadata.get('kl/mean', 0):.4f}"
+            
             print(f"[Step {grpo_step}/{config.n_grpo_steps}] "
                   f"Loss: {avg_loss:.4f} | "
                   f"Reward: {reward_metadata['reward/mean']:.4f} (std: {reward_metadata['reward/std']:.4f}) | "
                   f"Format: {reward_metadata['reward/format_mean']:.2f} | "
                   f"Answer: {reward_metadata['reward/answer_mean']:.2f} | "
-                  f"Entropy: {avg_entropy:.4f} | "
+                  f"Entropy: {avg_entropy:.4f}{kl_info} | "
                   f"GradNorm: {grad_norm:.2f}{clipped_indicator} (max: {config.max_grad_norm})")
             
             # TensorBoard 记录
@@ -642,6 +657,12 @@ def train():
             writer.add_scalar("train/advantage_std", advantages.std().item(), grpo_step)
             # Token 熵 - 监控模型是否过度自信或模式崩溃的关键指标
             writer.add_scalar("train/token_entropy", avg_entropy, grpo_step)
+            
+            # KL 散度相关日志（如果启用）
+            if config.kl_coef > 0:
+                writer.add_scalar("train/kl_mean", loss_metadata.get('kl/mean', 0), grpo_step)
+                writer.add_scalar("train/kl_loss", loss_metadata.get('kl/loss', 0), grpo_step)
+                writer.add_scalar("train/policy_loss", loss_metadata.get('loss/policy', avg_loss), grpo_step)
         
         # ------------------------------------------
         # 8.8 定期验证
