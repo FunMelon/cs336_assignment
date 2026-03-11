@@ -495,14 +495,21 @@ def train():
                 input_ids = tokenized['input_ids'].to(config.train_device)
                 labels = tokenized['labels'].to(config.train_device)
                 
-                # 获取旧的 log probs
-                old_log_probs_dict = get_response_log_probs(
-                    model=policy,
-                    input_ids=input_ids,
-                    labels=labels,
-                    return_token_entropy=False,
-                )
-                old_log_probs_all = old_log_probs_dict['log_probs'].detach()
+                # 分批获取旧的 log probs，防止 OOM
+                all_old_log_probs = []
+                for i in range(0, config.rollout_batch_size, micro_train_batch_size):
+                    batch_input_ids = input_ids[i:i + micro_train_batch_size]
+                    batch_labels = labels[i:i + micro_train_batch_size]
+                    
+                    batch_old_log_probs_dict = get_response_log_probs(
+                        model=policy,
+                        input_ids=batch_input_ids,
+                        labels=batch_labels,
+                        return_token_entropy=False,
+                    )
+                    all_old_log_probs.append(batch_old_log_probs_dict['log_probs'].detach())
+                
+                old_log_probs_all = torch.cat(all_old_log_probs, dim=0)
             policy.train()
         
         # ------------------------------------------
