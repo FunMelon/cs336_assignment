@@ -393,6 +393,8 @@ def grpo_microbatch_train_step(
     cliprange: float | None = None,
     normalize_constant: float | None = None,
     use_length_normalization: bool = True,
+    token_entropy: torch.Tensor | None = None,
+    entropy_coef: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     在一个微批次上计算策略梯度损失并执行反向传播。
@@ -409,6 +411,8 @@ def grpo_microbatch_train_step(
         cliprange: float | None，裁剪范围。
         normalize_constant: float | None，归一化常数。
         use_length_normalization: bool，是否对序列长度进行归一化（仅对 token 级损失有效）。
+        token_entropy: torch.Tensor | None，token 级熵，形状为 (batch_size, sequence_length)。
+        entropy_coef: float，熵奖励系数。>0 时在损失中加入 -entropy_coef * entropy_bonus。
 
     返回:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -448,16 +452,27 @@ def grpo_microbatch_train_step(
         # 标准做法：在批次上求均值
         normalized_loss = per_example_loss.mean()
 
-    # 4. 梯度累加缩放
+    # 4. 可选：添加熵奖励，抑制策略过早坍缩
+    if entropy_coef > 0.0:
+        if token_entropy is None:
+            raise ValueError("token_entropy is required when entropy_coef > 0")
+        entropy_bonus = masked_mean(token_entropy, response_mask)
+        normalized_loss = normalized_loss - entropy_coef * entropy_bonus
+    else:
+        entropy_bonus = normalized_loss.new_zeros(())
+
+    # 5. 梯度累加缩放
     scaled_loss = normalized_loss / gradient_accumulation_steps
 
-    # 5. 执行反向传播
+    # 6. 执行反向传播
     scaled_loss.backward()
 
-    # 6. 组装日志元数据
+    # 7. 组装日志元数据
     metadata.update({
         "unscaled_loss": normalized_loss.detach(),
         "scaled_loss": scaled_loss.detach(),
+        "entropy/bonus": entropy_bonus.detach(),
+        "entropy/coef": float(entropy_coef),
     })
 
     return scaled_loss, metadata

@@ -60,6 +60,7 @@ class Config:
     use_std_normalization: bool = False   # 是否使用标准差归一化
     use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
+    entropy_coef: float = 0.002           # 熵奖励系数（防止策略过早坍缩）
     
     # 优化器配置
     weight_decay: float = 0.0            # 权重衰减
@@ -113,6 +114,10 @@ def validate_config(config: Config):
             "因为它需要旧的对数概率"
         )
     
+    assert config.entropy_coef >= 0.0, (
+        f"entropy_coef ({config.entropy_coef}) 必须大于或等于 0"
+    )
+
     micro_batch_size = config.train_batch_size // config.gradient_accumulation_steps
     n_optimizer_steps_per_epoch = config.rollout_batch_size // config.train_batch_size
     
@@ -432,6 +437,7 @@ def train():
     print(f"vLLM GPU: {config.vllm_device}")
     print(f"损失类型: {config.loss_type}")
     print(f"标准差归一化: {config.use_std_normalization}")
+    print(f"熵奖励系数: {config.entropy_coef}")
     print("=" * 60 + "\n")
     
     for grpo_step in range(1, config.n_grpo_steps + 1):
@@ -531,6 +537,7 @@ def train():
         response_mask_all = tokenized['response_mask'].to(config.train_device)
         
         total_loss = 0.0
+        total_entropy_bonus = 0.0  # 累积熵奖励项
         total_entropy = 0.0  # 累积熵值
         total_entropy_tokens = 0  # 累积有效 token 数
         total_optimizer_steps = 0
@@ -594,9 +601,12 @@ def train():
                         old_log_probs=batch_old_log_probs,
                         cliprange=config.cliprange if config.loss_type in ["grpo_clip", "gspo_clip"] else None,
                         use_length_normalization=config.use_length_normalization,
+                        token_entropy=token_entropy,
+                        entropy_coef=config.entropy_coef,
                     )
                     
                     total_loss += loss_metadata['unscaled_loss'].item()
+                    total_entropy_bonus += loss_metadata['entropy/bonus'].item()
                     global_micro_idx += 1
                 
                 # 梯度裁剪（返回的是裁剪前的梯度范数）
@@ -612,6 +622,7 @@ def train():
         # 计算平均损失（基于总的优化器更新次数 * 梯度累积步数）
         n_total_microbatches = total_optimizer_steps * config.gradient_accumulation_steps
         avg_loss = total_loss / n_total_microbatches if n_total_microbatches > 0 else 0.0
+        avg_entropy_bonus = total_entropy_bonus / n_total_microbatches if n_total_microbatches > 0 else 0.0
         
         # 计算平均 token 熵
         avg_entropy = total_entropy / total_entropy_tokens if total_entropy_tokens > 0 else 0.0
@@ -627,6 +638,7 @@ def train():
                   f"Format: {reward_metadata['reward/format_mean']:.2f} | "
                   f"Answer: {reward_metadata['reward/answer_mean']:.2f} | "
                   f"Entropy: {avg_entropy:.4f} | "
+                  f"EntropyBonus: {avg_entropy_bonus:.4f} (coef: {config.entropy_coef:.4f}) | "
                   f"GradNorm: {grad_norm:.2f}{clipped_indicator} (max: {config.max_grad_norm})")
             
             # TensorBoard 记录
@@ -642,6 +654,7 @@ def train():
             writer.add_scalar("train/advantage_std", advantages.std().item(), grpo_step)
             # Token 熵 - 监控模型是否过度自信或模式崩溃的关键指标
             writer.add_scalar("train/token_entropy", avg_entropy, grpo_step)
+            writer.add_scalar("train/entropy_bonus", avg_entropy_bonus, grpo_step)
         
         # ------------------------------------------
         # 8.8 定期验证
