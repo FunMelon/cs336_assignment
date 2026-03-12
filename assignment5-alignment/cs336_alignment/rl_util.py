@@ -1,6 +1,34 @@
 import torch
 from typing import Callable, Literal
 
+
+def filter_groups_by_dynamic_sampling(
+    raw_rewards: torch.Tensor,
+    group_size: int,
+) -> list[int]:
+    """
+    DAPO 动态采样：过滤掉组内奖励标准差为 0 的组（即全对或全错的组）。
+
+    这些组的所有回答获得相同奖励，因此经过组归一化后优势值全为 0，
+    不会产生任何有效梯度信号，白白占用训练批次的位置。
+    过滤掉它们可以提高训练效率和稳定性。
+
+    参数:
+        raw_rewards: torch.Tensor 形状为 (rollout_batch_size,)，每个回答的原始奖励。
+        group_size: int 每个 prompt 生成的回答数量。
+
+    返回:
+        list[int]: 需要保留的组索引列表（即组内奖励标准差 > 0 的组）。
+    """
+    num_prompts = len(raw_rewards) // group_size
+    grouped_rewards = raw_rewards.view(num_prompts, group_size)
+    group_stds = grouped_rewards.std(dim=1)
+
+    # 保留标准差 > 0 的组（即非全对/全错的组）
+    valid_group_indices = [i for i in range(num_prompts) if group_stds[i].item() > 0]
+    return valid_group_indices
+
+
 def compute_group_normalized_rewards(
     reward_fn: Callable[[str, str], dict[str, float]],
     rollout_responses: list[str],

@@ -23,6 +23,7 @@ from util import (
 )
 from rl_util import (
     compute_group_normalized_rewards,
+    filter_groups_by_dynamic_sampling,
     grpo_microbatch_train_step,
 )
 from drgrpo_grader import r1_zero_reward_fn
@@ -61,6 +62,10 @@ class Config:
     use_length_normalization: bool = True  # 是否对序列长度归一化（False=求和，推荐；True=求均值，会引入长度偏置）
     cliprange: float = 0.2               # GRPO-Clip 裁剪范围（仅 off-policy 使用）
     use_asymmetric_clip: bool = True    # 是否启用非对称裁剪（上界放宽为 1+2*cliprange）
+    
+    # DAPO 动态采样配置
+    use_dynamic_sampling: bool = True    # 是否启用动态采样（过滤全对/全错的组）
+    max_resample_times: int = 10         # 最大重采样次数（防止无限循环）
     
     # 优化器配置
     weight_decay: float = 0.0            # 权重衰减
@@ -453,19 +458,105 @@ def train():
         prompts = [format_prompt(prompt_template, q) for q in questions]
         
         # ------------------------------------------
-        # 8.3 使用 vLLM 进行 Rollout
+        # 8.3 使用 vLLM 进行 Rollout（含 DAPO 动态采样）
         # ------------------------------------------
-        repeated_prompts, rollout_responses = rollout_with_vllm(
-            llm=vllm_engine,
-            prompts=prompts,
-            group_size=config.group_size,
-            sampling_params=rollout_sampling_params,
-        )
-        
-        # 重复 ground_truths 以匹配 rollout_responses
-        repeated_ground_truths = []
-        for gt in ground_truths:
-            repeated_ground_truths.extend([gt] * config.group_size)
+        if config.use_dynamic_sampling:
+            # DAPO 动态采样：不断采样直到收集到足够多有效组（组内奖励非全同）
+            collected_prompts = []       # 收集的 repeated prompts
+            collected_responses = []     # 收集的 rollout responses
+            collected_ground_truths = [] # 收集的 repeated ground truths
+            
+            # 待采样的 prompts 和 ground truths（初始为全部）
+            pending_prompts = list(prompts)
+            pending_ground_truths = list(ground_truths)
+            
+            for resample_round in range(config.max_resample_times + 1):
+                if not pending_prompts:
+                    break
+                
+                # 对待采样的 prompts 进行 rollout
+                round_repeated_prompts, round_responses = rollout_with_vllm(
+                    llm=vllm_engine,
+                    prompts=pending_prompts,
+                    group_size=config.group_size,
+                    sampling_params=rollout_sampling_params,
+                )
+                
+                # 构造对应的 repeated ground truths
+                round_repeated_gts = []
+                for gt in pending_ground_truths:
+                    round_repeated_gts.extend([gt] * config.group_size)
+                
+                # 计算原始奖励以判断哪些组有效
+                round_raw_rewards = []
+                for resp, gt in zip(round_responses, round_repeated_gts):
+                    rewards_dict = r1_zero_reward_fn(resp, gt)
+                    round_raw_rewards.append(rewards_dict["reward"])
+                round_raw_rewards_tensor = torch.tensor(round_raw_rewards, dtype=torch.float32)
+                
+                # 过滤：找出有效组（组内奖励标准差 > 0）
+                valid_indices = filter_groups_by_dynamic_sampling(
+                    round_raw_rewards_tensor, config.group_size
+                )
+                
+                # 收集有效组的数据
+                for idx in valid_indices:
+                    start = idx * config.group_size
+                    end = start + config.group_size
+                    collected_prompts.extend(round_repeated_prompts[start:end])
+                    collected_responses.extend(round_responses[start:end])
+                    collected_ground_truths.extend(round_repeated_gts[start:end])
+                
+                # 找出无效组，准备重采样
+                invalid_indices = set(range(len(pending_prompts))) - set(valid_indices)
+                
+                n_collected_groups = len(collected_prompts) // config.group_size
+                n_needed_groups = n_prompts_per_rollout_batch
+                
+                if n_collected_groups >= n_needed_groups:
+                    # 已收集到足够的有效组，截断多余的
+                    max_samples = n_needed_groups * config.group_size
+                    collected_prompts = collected_prompts[:max_samples]
+                    collected_responses = collected_responses[:max_samples]
+                    collected_ground_truths = collected_ground_truths[:max_samples]
+                    break
+                
+                if resample_round < config.max_resample_times:
+                    # 还需要更多有效组，从数据集中重新采样新的 prompts
+                    n_still_needed = n_needed_groups - n_collected_groups
+                    resample_batch = next(data_iterator)
+                    # 只取需要的数量
+                    resample_batch = resample_batch[:n_still_needed]
+                    pending_prompts = [format_prompt(prompt_template, item['question']) for item in resample_batch]
+                    pending_ground_truths = [item['label'] for item in resample_batch]
+                else:
+                    # 达到最大重采样次数，使用已收集的（可能不足 rollout_batch_size）
+                    break
+            
+            repeated_prompts = collected_prompts
+            rollout_responses = collected_responses
+            repeated_ground_truths = collected_ground_truths
+            actual_rollout_size = len(repeated_prompts)
+            
+            n_filtered = n_prompts_per_rollout_batch - (actual_rollout_size // config.group_size)
+            if n_filtered > 0:
+                print(f"  [动态采样] 经 {resample_round + 1} 轮采样, "
+                      f"最终收集 {actual_rollout_size // config.group_size}/{n_prompts_per_rollout_batch} 个有效组 "
+                      f"(过滤 {n_filtered} 个全同组)")
+        else:
+            # 不使用动态采样，保持原有逻辑
+            repeated_prompts, rollout_responses = rollout_with_vllm(
+                llm=vllm_engine,
+                prompts=prompts,
+                group_size=config.group_size,
+                sampling_params=rollout_sampling_params,
+            )
+            
+            # 重复 ground_truths 以匹配 rollout_responses
+            repeated_ground_truths = []
+            for gt in ground_truths:
+                repeated_ground_truths.extend([gt] * config.group_size)
+            actual_rollout_size = len(repeated_prompts)
         
         # ------------------------------------------
         # 8.4 计算组归一化奖励（优势）
@@ -500,7 +591,7 @@ def train():
                 
                 # 分批获取旧的 log probs，防止 OOM
                 all_old_log_probs = []
-                for i in range(0, config.rollout_batch_size, micro_train_batch_size):
+                for i in range(0, actual_rollout_size, micro_train_batch_size):
                     batch_input_ids = input_ids[i:i + micro_train_batch_size]
                     batch_labels = labels[i:i + micro_train_batch_size]
                     
@@ -520,9 +611,11 @@ def train():
         # ------------------------------------------
         policy.train()
         
-        # 计算每个 epoch 可以进行多少次优化器更新
-        # 更新频率由 train_batch_size 控制
-        n_optimizer_steps_per_epoch = config.rollout_batch_size // config.train_batch_size
+        # 根据实际 rollout 大小重新计算训练循环参数
+        # 动态采样后 actual_rollout_size 可能小于 config.rollout_batch_size
+        n_available_microbatches = actual_rollout_size // micro_train_batch_size
+        actual_grad_accum_steps = min(config.gradient_accumulation_steps, max(1, n_available_microbatches))
+        n_optimizer_steps_per_epoch = max(1, n_available_microbatches // actual_grad_accum_steps)
         
         # 分词一次（整个 rollout batch）
         tokenized = tokenize_prompt_and_output(
@@ -539,8 +632,8 @@ def train():
         grad_norm = 0.0
         
         for epoch in range(config.epochs_per_rollout_batch):
-            # 每个 epoch 打乱索引
-            indices = list(range(config.rollout_batch_size))
+            # 每个 epoch 打乱索引（使用动态采样后的实际大小）
+            indices = list(range(actual_rollout_size))
             random.shuffle(indices)
             
             # 全局微批次索引（在当前 epoch 内）
@@ -550,8 +643,8 @@ def train():
             for opt_step in range(n_optimizer_steps_per_epoch):
                 optimizer.zero_grad()
                 
-                # 每次优化器更新累积 gradient_accumulation_steps 个微批次
-                for accum_idx in range(config.gradient_accumulation_steps):
+                # 每次优化器更新累积 actual_grad_accum_steps 个微批次
+                for accum_idx in range(actual_grad_accum_steps):
                     start_idx = global_micro_idx * micro_train_batch_size
                     end_idx = start_idx + micro_train_batch_size
                     batch_indices = indices[start_idx:end_idx]
@@ -589,7 +682,7 @@ def train():
                     scaled_loss, loss_metadata = grpo_microbatch_train_step(
                         policy_log_probs=policy_log_probs,
                         response_mask=response_mask,
-                        gradient_accumulation_steps=config.gradient_accumulation_steps,
+                        gradient_accumulation_steps=actual_grad_accum_steps,
                         loss_type=config.loss_type,
                         raw_rewards=batch_raw_rewards.unsqueeze(-1) if config.loss_type == "no_baseline" else None,
                         advantages=batch_advantages.unsqueeze(-1) if config.loss_type != "no_baseline" else None,
@@ -612,8 +705,8 @@ def train():
                 optimizer.step()
                 total_optimizer_steps += 1
         
-        # 计算平均损失（基于总的优化器更新次数 * 梯度累积步数）
-        n_total_microbatches = total_optimizer_steps * config.gradient_accumulation_steps
+        # 计算平均损失（基于总的优化器更新次数 * 实际梯度累积步数）
+        n_total_microbatches = total_optimizer_steps * actual_grad_accum_steps
         avg_loss = total_loss / n_total_microbatches if n_total_microbatches > 0 else 0.0
         
         # 计算平均 token 熵
@@ -645,6 +738,12 @@ def train():
             writer.add_scalar("train/advantage_std", advantages.std().item(), grpo_step)
             # Token 熵 - 监控模型是否过度自信或模式崩溃的关键指标
             writer.add_scalar("train/token_entropy", avg_entropy, grpo_step)
+            # 动态采样统计
+            if config.use_dynamic_sampling:
+                writer.add_scalar("train/dynamic_sampling_valid_groups",
+                                  actual_rollout_size // config.group_size, grpo_step)
+                writer.add_scalar("train/dynamic_sampling_target_groups",
+                                  n_prompts_per_rollout_batch, grpo_step)
         
         # ------------------------------------------
         # 8.8 定期验证
