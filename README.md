@@ -187,3 +187,11 @@
 | ppo_step=3| 0.9092 | 0.7339 |
 | ppo_step=3(无clip)| 0.9469 | 0.6028 |
 | Dr GRPO + ppo_step=2 | 0.9795 | 0.7733 |
+
+尝试了GSPO的序列奖励和DAPO的动态采样，但是效果均不好 
+
+- GSPO的梯度爆炸增长，熵快速降低，应该是熵坍缩现象
+- DR GRPO比较有用，避免了GRPO组内std过小时的大Advantage
+- 动态采样的reward极为糟糕，应该是破坏了reward计算的锚定点，且其思想和Dr GRPO有冲突，这部分交给Dr GRPO更好
+
+![tensorboard](assignment5-alignment/assert/plot.png)
